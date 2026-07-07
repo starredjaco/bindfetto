@@ -60,12 +60,17 @@ adb push target/aarch64-linux-android/release/bindfetto /data/local/tmp/
 adb shell /data/local/tmp/bindfetto      # run as root
 ```
 
-Expected M1 output, one line per transaction:
+Expected output (M1–M3), one line per transaction:
 
 ```
-1234 -> 5678: code=7 flags=0x0 size=0 oneway
+com.android.car (11428) -> ...vehicle@V1-emulator-service (11410): android.hardware.automotive.vehicle.IVehicle.[code:3], 228B
+...vehicle@V1-emulator-service (11410) -> com.android.car (11428): <reply code:0>, 4B
+...bluetooth@1.1-service.btlinux (12743) -> hwservicemanager (154): <non-aidl code:3>, 204B
 ```
 
-(pids only — process names arrive in M2, real interface/method in M3.)
+Process names come from `/proc/<pid>/cmdline`; the interface descriptor is decoded
+from the parcel (AIDL `'SYST'` token). Replies and HIDL/hwbinder transactions are
+labeled `<reply>` / `<non-aidl>`. The method name (from `[code:N]`) is resolved
+offline against the AIDL catalog — a later milestone.
 
 See the repo-root `ROADMAP.md` for the milestone sequence.

@@ -8,10 +8,15 @@
 /// `TF_ONE_WAY` — set in [`TxEvent::flags`] for async (oneway) transactions.
 pub const TF_ONE_WAY: u32 = 0x01;
 
+/// Max bytes of UTF-16LE interface descriptor captured; longer names truncate.
+pub const MAX_IFACE_BYTES: usize = 128;
+
+/// Header magic that `Parcel::writeInterfaceToken` writes (`B_PACK_CHARS('S','Y',
+/// 'S','T')`) read back as a little-endian u32. Its presence at parcel offset 8
+/// marks a transaction that begins with an interface descriptor.
+pub const IFACE_HEADER_MAGIC: u32 = 0x5359_5354;
+
 /// One captured Binder transaction.
-///
-/// Milestone 1 fills only pids/code/flags. `data_size` and the raw interface
-/// descriptor bytes are added in later milestones (see ROADMAP).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TxEvent {
@@ -27,8 +32,15 @@ pub struct TxEvent {
     pub code: u32,
     /// Transaction flags; test against [`TF_ONE_WAY`] for async.
     pub flags: u32,
-    /// Parcel payload size in bytes. 0 until the buffer read lands (M3).
+    /// Non-zero if this is a reply (replies carry no interface descriptor).
+    pub reply: u32,
+    /// Parcel payload size in bytes.
     pub data_size: u32,
+    /// Valid bytes in [`iface`] (UTF-16LE); 0 when the transaction carries no
+    /// interface descriptor (replies, special transactions, unreadable buffer).
+    pub iface_byte_len: u32,
+    /// Interface descriptor as raw UTF-16LE bytes, decoded by the consumer.
+    pub iface: [u8; MAX_IFACE_BYTES],
 }
 
 impl TxEvent {

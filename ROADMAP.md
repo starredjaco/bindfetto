@@ -10,11 +10,13 @@ Vertical slices; each one runs on the AVD before the next starts.
   `{src_pid, dst_pid, code, flags, size}` through the ring buffer, print to
   console. Verified live on an arm64 AVD — captures real binder traffic with
   correct pids/code/flags and oneway detection.
-- **M2 — process names.** Resolve `/proc/<pid>/cmdline` with a pid→name cache;
-  emit `name (pid) -> name (pid)`.
-- **M3 — interface descriptor.** Probe copies raw descriptor bytes out of the
-  parcel head; consumer does UTF-16→UTF-8 decode → real interface name. Add
-  `data_size`. (Ports the proven PoC extraction.)
+- **M2 — process names.** ✅ **Done.** Resolve `/proc/<pid>/cmdline` with a
+  pid→name cache; emit `name (pid) -> name (pid)`.
+- **M3 — interface descriptor + size.** ✅ **Done.** A kprobe on
+  `binder_transaction()` reads `data_size` and the parcel buffer; the consumer
+  UTF-16-decodes the interface descriptor (validated by the `'SYST'` token magic).
+  Replies show `<reply>`, HIDL/hwbinder & special transactions show `<non-aidl>`.
+  Verified live on the AVD (automotive AIDL + a HIDL bluetooth call).
 - **M4 — in-kernel filter.** Hash descriptor bytes in the probe; match against a
   BPF map of wanted hashes to drop before the ring buffer.
 - **M5 — errors + sinks + CLI.** Second attach point for
