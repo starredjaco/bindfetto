@@ -1,0 +1,26 @@
+[package]
+name = "bindfetto-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Built for bpfel-unknown-none via the consumer's build.rs (aya-build); not a
+# member of the root workspace. Uses its own [workspace] table so it resolves
+# independently of the host workspace.
+[workspace]
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+bindfetto-common = { path = "../bindfetto-common" }
+
+[[bin]]
+name = "bindfetto"
+path = "src/main.rs"
+
+[profile.release]
+# eBPF must be optimized and keep debug info stripped appropriately for the verifier.
+opt-level = 2
+debug = false
+lto = true
+panic = "abort"

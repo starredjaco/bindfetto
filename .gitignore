@@ -6,6 +6,13 @@
 .vscode/
 *.swp
 
+# Local tooling
+.claude/settings.local.json
+
+# Rust
+/runtime/target/
+target/
+
 # Build output
 /build/
 /out/

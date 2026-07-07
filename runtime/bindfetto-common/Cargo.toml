@@ -1,0 +1,14 @@
+[package]
+name = "bindfetto-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# no_std by default so it can be shared with the eBPF crate. The `user` feature
+# pulls in aya to impl `Pod`, enabling zero-copy reads on the userspace side.
+[features]
+default = []
+user = ["aya"]
+
+[dependencies]
+aya = { workspace = true, optional = true }

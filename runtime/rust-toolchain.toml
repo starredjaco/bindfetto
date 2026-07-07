@@ -1,0 +1,5 @@
+# eBPF crates are built for `bpfel-unknown-none` with build-std, which needs
+# nightly + rust-src. The userspace consumer builds fine on this toolchain too.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy"]

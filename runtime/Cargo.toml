@@ -1,0 +1,27 @@
+# Cargo workspace for the on-device runtime: eBPF probe + userspace consumer.
+#
+# NOTE: the eBPF crate (bindfetto-ebpf) is compiled for the `bpfel-unknown-none`
+# target by the consumer's build.rs via `aya-build`, not as a normal workspace
+# member build. It is listed under `exclude` so `cargo build` at the workspace
+# root only builds host/Android userspace crates.
+[workspace]
+resolver = "2"
+members = ["bindfetto", "bindfetto-common"]
+exclude = ["bindfetto-ebpf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# Pinned to a recent aya release. UNVERIFIED in this repo (no toolchain present) —
+# confirm against the latest aya when you first build, or regenerate the boilerplate
+# with `cargo generate aya-template` and drop the src/ files in. See README.md.
+[workspace.dependencies]
+aya = "0.13"
+aya-build = "0.1"
+aya-ebpf = "0.1"
+aya-log = "0.2"
+aya-log-ebpf = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }

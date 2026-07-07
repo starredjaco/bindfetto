@@ -1,0 +1,21 @@
+[package]
+name = "bindfetto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aya = { workspace = true }
+aya-log = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+bindfetto-common = { path = "../bindfetto-common", features = ["user"] }
+
+[build-dependencies]
+# Compiles bindfetto-ebpf for the bpf target and embeds the object so the binary
+# can load it at runtime.
+aya-build = { workspace = true }
+
+[[bin]]
+name = "bindfetto"
+path = "src/main.rs"
