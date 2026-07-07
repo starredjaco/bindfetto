@@ -6,9 +6,10 @@ Design lives in [SPEC.md](./SPEC.md). This is the build order.
 
 Vertical slices; each one runs on the AVD before the next starts.
 
-- **M1 — bare pipeline.** Attach to `binder:binder_transaction`, push
+- **M1 — bare pipeline.** ✅ **Done.** Attach to `binder:binder_transaction`, push
   `{src_pid, dst_pid, code, flags, size}` through the ring buffer, print to
-  console. Proves toolchain, cross-compile, attach, ring buffer, SELinux. *(scaffolded)*
+  console. Verified live on an arm64 AVD — captures real binder traffic with
+  correct pids/code/flags and oneway detection.
 - **M2 — process names.** Resolve `/proc/<pid>/cmdline` with a pid→name cache;
   emit `name (pid) -> name (pid)`.
 - **M3 — interface descriptor.** Probe copies raw descriptor bytes out of the

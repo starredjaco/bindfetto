@@ -19,16 +19,16 @@ use bindfetto_common::TxEvent;
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
-// Field offsets inside the binder_transaction tracepoint record, past the 8-byte
-// common header. These MUST be verified on the target kernel:
+// Field offsets inside the binder_transaction tracepoint record (absolute from the
+// record start, as `read_at` expects). Taken from the target kernel's format file:
 //
 //   adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
 //
-// The values below are placeholders for the M1 skeleton — replace with the real
-// offsets from that format file before trusting the output.
-const OFF_TO_PROC: usize = 24; // TODO(M1): verify against format file
-const OFF_CODE: usize = 36; // TODO(M1): verify against format file
-const OFF_FLAGS: usize = 40; // TODO(M1): verify against format file
+// Verified on the API-level AVD (kernel tracepoint ID 900): to_proc@16, code@28,
+// flags@32. Re-check if targeting a different kernel.
+const OFF_TO_PROC: usize = 16;
+const OFF_CODE: usize = 28;
+const OFF_FLAGS: usize = 32;
 
 #[tracepoint(category = "binder", name = "binder_transaction")]
 pub fn binder_transaction(ctx: TracePointContext) -> u32 {
