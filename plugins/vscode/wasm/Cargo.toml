@@ -1,0 +1,19 @@
+[package]
+name = "bindfetto-decode-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for the bindfetto decode core (VS Code extension)."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bindfetto-decode = { path = "../../../decode" }
+
+# Small, self-contained wasm: optimize for size and strip panic machinery.
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

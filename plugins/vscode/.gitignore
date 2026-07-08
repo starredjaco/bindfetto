@@ -1,0 +1,12 @@
+# Node
+node_modules/
+
+# TypeScript build output
+dist/
+
+# Generated wasm artifact (built from wasm/ via `npm run build:wasm`)
+media/*.wasm
+
+# VS Code extension test/packaging
+.vscode-test/
+*.vsix

@@ -38,12 +38,16 @@ Vertical slices; each one runs on the AVD before the next starts.
   - ✅ `bindfetto-decode` stdin→stdout / file CLI.
   - ✅ C ABI (`decode/src/ffi.rs` + `decode/include/bindfetto_decode.h`,
     staticlib/cdylib crate types) for native embedders; verified with a C smoke test.
-  - ⏳ WASM (wasm-bindgen) for VS Code.
+  - ✅ WASM: core builds for `wasm32-unknown-unknown`; `plugins/vscode/wasm/` re-exports
+    the decoder ABI + a byte allocator. All expected symbols exported.
 - **B3 — viewer plugins**:
   - ✅ DLT Viewer plugin (`plugins/dlt/`, C++/Qt `QDLTPluginDecoderInterface` over the
-    C ABI): `isMsg` matches the `BINDFETTO` marker, `decodeMsg` rewrites via the core,
-    catalog loaded through `loadConfig`. Needs building against a dlt-viewer SDK.
-  - ⏳ VS Code extension (WASM over the core).
+    C ABI): verified end-to-end on macOS (Qt 6.11) — loads via `QPluginLoader`,
+    `decodeMsg` rewrites via the core.
+  - ✅ VS Code extension (`plugins/vscode/`, TypeScript over the WASM core): one command
+    (**Decode Active Editor**) + `bindfetto.catalogPath` setting; `src/decoder.ts`
+    marshals strings across the wasm boundary. Wasm builds + exports verified; TS/Node
+    build (`tsc`) and in-editor run pending a modern Node.
 
 ## Track C — control app (`app/`, Kotlin)
 

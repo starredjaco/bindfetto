@@ -1,0 +1,44 @@
+{
+  "name": "bindfetto-decode",
+  "displayName": "Bindfetto Decode",
+  "description": "Resolve bindfetto Binder transaction codes to AIDL method names.",
+  "version": "0.1.0",
+  "publisher": "bindfetto",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bindfetto.decodeActiveEditor",
+        "title": "Bindfetto: Decode Active Editor"
+      }
+    ],
+    "configuration": {
+      "title": "Bindfetto",
+      "properties": {
+        "bindfetto.catalogPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the AIDL catalog JSON used to resolve transaction codes to method names."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build:wasm": "cargo build --release --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown && mkdir -p media && cp wasm/target/wasm32-unknown-unknown/release/bindfetto_decode_wasm.wasm media/",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "smoke": "node scripts/smoke.mjs",
+    "vscode:prepublish": "npm run build:wasm && npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
