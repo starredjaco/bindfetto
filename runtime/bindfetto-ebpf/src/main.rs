@@ -90,8 +90,8 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
             let units =
                 unsafe { bpf_probe_read_user((buf_ptr + P_STRLEN) as *const u32) }.unwrap_or(0);
             // Read only the descriptor's own bytes, clamped to our buffer and to the
-            // parcel payload: a fixed 128-byte read could cross into an unmapped page
-            // past a short parcel and fail, losing a perfectly valid descriptor.
+            // parcel payload: a fixed MAX_IFACE_BYTES read could cross into an unmapped
+            // page past a short parcel and fail, losing a perfectly valid descriptor.
             //
             // Verifier note: clamp BOTH candidates against the constant MAX first.
             // A reg-vs-reg min doesn't propagate bounds to the selected register, so

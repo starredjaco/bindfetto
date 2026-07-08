@@ -9,7 +9,9 @@
 pub const TF_ONE_WAY: u32 = 0x01;
 
 /// Max bytes of UTF-16LE interface descriptor captured; longer names truncate.
-pub const MAX_IFACE_BYTES: usize = 128;
+/// 256 bytes = 128 UTF-16 code units, enough for long names like
+/// `ICarWatchdogServiceForSystem` that overflowed the original 128.
+pub const MAX_IFACE_BYTES: usize = 256;
 
 /// Header magic that `Parcel::writeInterfaceToken` writes (`B_PACK_CHARS('S','Y',
 /// 'S','T')`) read back as a little-endian u32. Its presence at parcel offset 8
