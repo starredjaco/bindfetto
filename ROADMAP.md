@@ -28,9 +28,12 @@ Vertical slices; each one runs on the AVD before the next starts.
 
 ## Track B — offline decode
 
-- **B1 — catalog builder** (`catalog/`, Python): folder of AIDL → JSON catalog via
-  generated stubs / `aidl --dumpapi`; handle explicit `= N` ids and special
-  transactions.
+- **B1 — catalog builder** (`catalog/`, Python) ✅: `bindfetto_catalog.py` turns AIDL
+  (a file, a recursed folder, or an http(s) URL) → JSON catalog, numbering methods by
+  declaration order from `FIRST_CALL_TRANSACTION` and honoring explicit `= N`; skips
+  consts/nested types; strips comments+annotations. Stdlib-only, unit-tested, and
+  verified end-to-end (generated catalog → Rust decoder) and against a live AOSP
+  `.aidl` URL.
 - **B2 — shared decoder core + `bindfetto-decode` CLI** (`decode/`, Rust): line
   parse + catalog lookup → method name. In progress.
   - ✅ Core crate: `Catalog`/`Decoder`, prefix-agnostic `decode_line` rewrite,
