@@ -56,7 +56,9 @@ The consumer writes each formatted log line to one of (`--sink console|logcat|bo
   targets the OEM already pipes logcat into DLT, so **no logcat→DLT bridge is ours to
   build**.
 - **console** (stdout) — for local/interactive use; adds a wall-clock timestamp.
-- **local file** — for offline capture and later decoding *(planned)*.
+- **local file (JSONL)** — `--jsonl <path>` writes one structured JSON object per
+  transaction for offline capture and decoding. Composes with any `--sink` (use
+  `--sink none` for a file-only capture).
 
 ### Process name resolution
 

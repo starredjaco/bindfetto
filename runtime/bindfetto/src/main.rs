@@ -9,12 +9,15 @@
 //! descriptor is decoded from the UTF-16LE bytes captured by the probe; the method
 //! name itself is resolved offline against the AIDL catalog (later milestone).
 //!
-//! Sink: `--sink console|logcat|both` (default console). Logcat lines use tag
-//! `bindfetto` and carry the `BINDFETTO` marker so the offline decoder can select
-//! them.
+//! Sinks: `--sink console|logcat|both|none` (default console) for human-readable
+//! lines — logcat lines use tag `bindfetto` and carry the `BINDFETTO` marker so the
+//! offline decoder can select them. Independently, `--jsonl <path>` writes one
+//! structured JSON object per transaction to a file for offline capture and decoding;
+//! it composes with any `--sink` (use `--sink none` for a file-only capture).
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufWriter, Write as _};
 
 use anyhow::Context as _;
 use aya::{
@@ -34,12 +37,14 @@ const LOG_TAG: &str = "bindfetto";
 /// where the tag may be flattened.
 const LOG_MARKER: &str = "BINDFETTO";
 
-/// Output destination for formatted transaction lines.
+/// Destination for the human-readable transaction lines.
 #[derive(Clone, Copy)]
 enum Sink {
     Console,
     Logcat,
     Both,
+    /// Neither text sink — for a quiet, file-only (`--jsonl`) capture.
+    None,
 }
 
 impl Sink {
@@ -51,17 +56,21 @@ impl Sink {
     }
 
     fn parse(args: &[String]) -> Self {
-        match args
-            .iter()
-            .position(|a| a == "--sink")
-            .and_then(|i| args.get(i + 1))
-            .map(String::as_str)
-        {
+        match arg_value(args, "--sink") {
             Some("logcat") => Sink::Logcat,
             Some("both") => Sink::Both,
+            Some("none") => Sink::None,
             _ => Sink::Console,
         }
     }
+}
+
+/// The value following `flag` in the args, if present (`--flag value`).
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// Minimal binding to Android's liblog for the logcat sink.
@@ -103,60 +112,156 @@ async fn main() -> anyhow::Result<()> {
     tp.attach("binder", "binder_transaction")
         .context("attach binder:binder_transaction (need root + BPF-permissive SELinux)")?;
 
-    let sink = Sink::parse(&std::env::args().collect::<Vec<_>>());
+    let args: Vec<String> = std::env::args().collect();
+    let sink = Sink::parse(&args);
+    let jsonl = match arg_value(&args, "--jsonl") {
+        Some(path) => Some(BufWriter::new(
+            fs::File::create(path).with_context(|| format!("create jsonl file {path}"))?,
+        )),
+        None => None,
+    };
+
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
     let mut async_ring = AsyncFd::new(ring)?;
     let mut names = NameCache::default();
     // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
     let boot_offset_ns = monotonic_to_realtime_offset_ns();
+    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl);
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
-
-    // Reused across every event so the drain loop allocates nothing per line.
-    let mut core = String::new();
-    let mut scratch = String::new();
 
     loop {
         let mut guard = async_ring.readable_mut().await?;
         let ring = guard.get_inner_mut();
         while let Some(item) = ring.next() {
             let ev: &TxEvent = unsafe { &*(item.as_ptr() as *const TxEvent) };
-            emit(ev, &mut names, boot_offset_ns, sink, &mut core, &mut scratch);
+            emitter.emit(ev, &mut names);
         }
+        // Flush the JSONL file once per wakeup so a Ctrl-C loses at most the current
+        // (already-drained) batch.
+        emitter.flush();
         guard.clear_ready();
     }
 }
 
-/// Emit one transaction to the configured sink(s).
-///
-/// `core` and `scratch` are caller-owned buffers reused across every event so the
-/// hot path allocates nothing on the heap (their capacity is retained between calls).
-fn emit(
-    ev: &TxEvent,
-    names: &mut NameCache,
-    boot_offset_ns: i128,
+/// Owns the output config plus buffers reused across every event, so no sink
+/// allocates on the heap per line (buffer capacity is retained between calls).
+struct Emitter {
     sink: Sink,
-    core: &mut String,
-    scratch: &mut String,
-) {
-    core.clear();
-    format_core(core, ev, names);
-    if sink.console() {
-        scratch.clear();
-        write_timestamp(scratch, ev.ts_ns, boot_offset_ns);
-        scratch.push(' ');
-        scratch.push_str(core.as_str());
-        println!("{scratch}");
+    boot_offset_ns: i128,
+    jsonl: Option<BufWriter<fs::File>>,
+    core: String,
+    scratch: String,
+    json: String,
+}
+
+impl Emitter {
+    fn new(sink: Sink, boot_offset_ns: i128, jsonl: Option<BufWriter<fs::File>>) -> Self {
+        Self {
+            sink,
+            boot_offset_ns,
+            jsonl,
+            core: String::new(),
+            scratch: String::new(),
+            json: String::new(),
+        }
     }
-    if sink.logcat() {
-        // Logcat records its own timestamp, so the message carries only the marker
-        // and the core line. (liblog's C API copies the string, so one alloc here
-        // is unavoidable.)
-        scratch.clear();
-        scratch.push_str(LOG_MARKER);
-        scratch.push(' ');
-        scratch.push_str(core.as_str());
-        logcat::write(LOG_TAG, scratch.as_str());
+
+    /// Emit one transaction to every configured sink.
+    fn emit(&mut self, ev: &TxEvent, names: &mut NameCache) {
+        self.core.clear();
+        format_core(&mut self.core, ev, names);
+        if self.sink.console() {
+            self.scratch.clear();
+            write_timestamp(&mut self.scratch, ev.ts_ns, self.boot_offset_ns);
+            self.scratch.push(' ');
+            self.scratch.push_str(&self.core);
+            println!("{}", self.scratch);
+        }
+        if self.sink.logcat() {
+            // Logcat records its own timestamp, so the message carries only the marker
+            // and the core line. (liblog's C API copies the string, so one alloc here
+            // is unavoidable.)
+            self.scratch.clear();
+            self.scratch.push_str(LOG_MARKER);
+            self.scratch.push(' ');
+            self.scratch.push_str(&self.core);
+            logcat::write(LOG_TAG, &self.scratch);
+        }
+        if self.jsonl.is_some() {
+            self.write_jsonl(ev, names);
+        }
+    }
+
+    /// Append one JSONL record for `ev` to the file sink. The structured fields let
+    /// offline decoders read them directly instead of re-parsing the pretty line.
+    fn write_jsonl(&mut self, ev: &TxEvent, names: &mut NameCache) {
+        use std::fmt::Write as _;
+
+        // Decode the interface into `scratch`; absent for replies / non-AIDL.
+        self.scratch.clear();
+        let has_iface = write_iface(&mut self.scratch, ev);
+
+        names.ensure(ev.src_pid);
+        names.ensure(ev.dst_pid);
+        let src = names.lookup(ev.src_pid);
+        let dst = names.lookup(ev.dst_pid);
+        let ts_ms = ((ev.ts_ns as i128 + self.boot_offset_ns) / 1_000_000) as i64;
+
+        self.json.clear();
+        let j = &mut self.json;
+        j.push('{');
+        let _ = write!(j, "\"ts_ms\":{ts_ms},\"src\":\"");
+        json_escape(j, src);
+        let _ = write!(j, "\",\"src_pid\":{},\"dst\":\"", ev.src_pid);
+        json_escape(j, dst);
+        let _ = write!(
+            j,
+            "\",\"dst_pid\":{},\"code\":{},\"size\":{},\"oneway\":{},\"reply\":{}",
+            ev.dst_pid,
+            ev.code,
+            ev.data_size,
+            ev.is_oneway(),
+            ev.reply != 0,
+        );
+        if has_iface {
+            j.push_str(",\"iface\":\"");
+            json_escape(j, &self.scratch);
+            j.push('"');
+        }
+        j.push('}');
+
+        if let Some(w) = self.jsonl.as_mut() {
+            let _ = writeln!(w, "{}", self.json);
+        }
+    }
+
+    /// Flush the JSONL file sink, if any.
+    fn flush(&mut self) {
+        if let Some(w) = self.jsonl.as_mut() {
+            let _ = w.flush();
+        }
+    }
+}
+
+/// Append `s` to `out` as the interior of a JSON string (no surrounding quotes),
+/// escaping per RFC 8259.
+fn json_escape(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
     }
 }
 

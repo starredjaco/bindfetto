@@ -21,8 +21,9 @@ Vertical slices; each one runs on the AVD before the next starts.
   BPF map of wanted hashes to drop before the ring buffer.
 - **M5 — errors + sinks + CLI.** In progress.
   - ✅ Console sink with wall-clock timestamp.
-  - ✅ Logcat sink (`--sink console|logcat|both`), tag `bindfetto` + `BINDFETTO` marker.
-  - ⏳ File / JSONL sink.
+  - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
+  - ✅ File / JSONL sink (`--jsonl <path>`, composes with any `--sink`; one JSON object
+    per transaction). Verified live on the AVD (671 records, all valid JSON).
   - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
   - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
 
