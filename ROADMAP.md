@@ -68,8 +68,16 @@ Vertical slices; each one runs on the AVD before the next starts.
 
 ## Track C — control app (`app/`, Kotlin)
 
-- **C1 — control channel**: unix socket + command protocol (shared with the CLI).
-- **C2 — app**: deploy binary (signature permission), start/stop, interface
-  filter, error toggle.
+- **C1 — control channel.** ✅ `--control [port]` (default 3491): a line-oriented TCP
+  server with `LIST` (interfaces observed so far), `GET` (active filter), `SET a,b,c`
+  (replace the in-kernel filter), and `CLEAR`. `SET`/`CLEAR` mutate the `WANTED`/
+  `FILTER_ON` maps live. (TCP over localhost / `adb forward` was chosen over the SPEC's
+  unix-socket + `SO_PEERCRED` design for testability; the socket hardening is deferred.)
+- **C2 — app.** ✅ (discovery + filter) Kotlin + Jetpack Compose app under `app/`:
+  connects to the control channel, shows observed interfaces as a checkbox list
+  (`ControlClient.kt`), and pushes the selection as the in-kernel filter. Verified
+  end-to-end on the AVD (Refresh → list, Apply → capture narrows in-kernel, Clear →
+  firehose returns). Still TODO: deploy binary (signature permission / adb fallback),
+  start/stop lifecycle, error toggle.
 
 Tracks B and C start once Track A produces stable output (≈after M3).

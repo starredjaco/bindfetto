@@ -23,14 +23,14 @@
 
 mod dlt_wire;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write as _};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use aya::{
-    maps::{Array, HashMap as BpfHashMap, RingBuf},
+    maps::{Array, HashMap as BpfHashMap, MapData, RingBuf},
     programs::{KProbe, TracePoint},
     Ebpf,
 };
@@ -200,6 +200,135 @@ mod dlt {
     }
 }
 
+/// Owns the two BPF filter maps and the current filter set, so the interface filter
+/// can be reconfigured at runtime (from the control channel) as well as at startup
+/// (`--iface`). Replacing the set removes the previous keys, inserts the new ones, and
+/// flips `FILTER_ON` — the probe reads both maps directly on the hot path.
+struct FilterCtl {
+    wanted: BpfHashMap<MapData, IfaceKey, u8>,
+    filter_on: Array<MapData, u32>,
+    active: Vec<String>,
+}
+
+impl FilterCtl {
+    /// Replace the wanted-interface set. Empty `names` disables filtering.
+    fn apply(&mut self, names: &[String]) -> anyhow::Result<()> {
+        for old in &self.active {
+            let _ = self.wanted.remove(&iface_key(old));
+        }
+        self.active.clear();
+        for name in names {
+            self.wanted
+                .insert(iface_key(name), 1u8, 0)
+                .with_context(|| format!("insert interface filter {name}"))?;
+            self.active.push(name.clone());
+        }
+        let on = u32::from(!self.active.is_empty());
+        self.filter_on.set(0, on, 0).context("set FILTER_ON")?;
+        Ok(())
+    }
+}
+
+/// Control channel: a line-oriented TCP server the control app connects to (via
+/// `adb forward` in dev, or localhost on-device). Commands, one per line:
+///
+/// * `LIST`  -> every interface descriptor seen so far, one per line, then `END`.
+/// * `GET`   -> the interfaces in the active filter, one per line, then `END`.
+/// * `SET a,b,c` -> replace the in-kernel filter with these interfaces; reply `OK <n>`.
+/// * `CLEAR` -> disable filtering; reply `OK 0`.
+///
+/// Discovery (`LIST`) feeds the app's selectable list; `SET` pushes the selection into
+/// the in-kernel filter live.
+mod control {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::FilterCtl;
+
+    /// State shared with the control server: the observed-interface set (written by the
+    /// emitter) and the runtime filter control.
+    pub struct Shared {
+        pub observed: Arc<Mutex<BTreeSet<String>>>,
+        pub filter: Arc<Mutex<FilterCtl>>,
+    }
+
+    /// Bind the control port and spawn the accept loop.
+    pub async fn serve(port: u16, shared: Arc<Shared>) -> std::io::Result<()> {
+        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+        tokio::spawn(async move {
+            while let Ok((sock, _addr)) = listener.accept().await {
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let _ = handle(sock, shared).await;
+                });
+            }
+        });
+        Ok(())
+    }
+
+    async fn handle(sock: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
+        let (read, mut write) = sock.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Some(line) = lines.next_line().await? {
+            let line = line.trim();
+            let (cmd, rest) = match line.split_once(' ') {
+                Some((c, r)) => (c, r.trim()),
+                None => (line, ""),
+            };
+            match cmd.to_ascii_uppercase().as_str() {
+                "LIST" => {
+                    let items: Vec<String> =
+                        shared.observed.lock().unwrap().iter().cloned().collect();
+                    for it in items {
+                        write.write_all(it.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                    }
+                    write.write_all(b"END\n").await?;
+                }
+                "GET" => {
+                    let items = shared.filter.lock().unwrap().active.clone();
+                    for it in items {
+                        write.write_all(it.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                    }
+                    write.write_all(b"END\n").await?;
+                }
+                "SET" => {
+                    let names: Vec<String> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let n = names.len();
+                    let res = shared.filter.lock().unwrap().apply(&names);
+                    match res {
+                        Ok(()) => write.write_all(format!("OK {n}\n").as_bytes()).await?,
+                        Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
+                    }
+                }
+                "CLEAR" => {
+                    let res = shared.filter.lock().unwrap().apply(&[]);
+                    match res {
+                        Ok(()) => write.write_all(b"OK 0\n").await?,
+                        Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
+                    }
+                }
+                "" => {}
+                other => {
+                    write
+                        .write_all(format!("ERR unknown command {other}\n").as_bytes())
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut ebpf = Ebpf::load(EBPF_OBJ).context("load eBPF object")?;
@@ -243,21 +372,24 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    // In-kernel interface filter (M4): push the wanted descriptors into the BPF map and
-    // flip the enable flag, so non-matching transactions are dropped in the probe before
-    // they ever reach the ring buffer.
+    // In-kernel interface filter (M4): own the two BPF maps so the filter can be set at
+    // startup (`--iface`) and reconfigured live over the control channel. Non-matching
+    // transactions are dropped in the probe before they ever reach the ring buffer.
+    let control_port = args.iter().position(|a| a == "--control").map(|i| {
+        args.get(i + 1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(3491)
+    });
     let ifaces = iface_filters(&args);
+    let mut filter = FilterCtl {
+        wanted: BpfHashMap::try_from(ebpf.take_map("WANTED").context("WANTED map missing")?)?,
+        filter_on: Array::try_from(
+            ebpf.take_map("FILTER_ON").context("FILTER_ON map missing")?,
+        )?,
+        active: Vec::new(),
+    };
     if !ifaces.is_empty() {
-        let mut wanted: BpfHashMap<_, IfaceKey, u8> =
-            BpfHashMap::try_from(ebpf.map_mut("WANTED").context("WANTED map missing")?)?;
-        for name in &ifaces {
-            wanted
-                .insert(iface_key(name), 1u8, 0)
-                .with_context(|| format!("insert interface filter {name}"))?;
-        }
-        let mut filter_on: Array<_, u32> =
-            Array::try_from(ebpf.map_mut("FILTER_ON").context("FILTER_ON map missing")?)?;
-        filter_on.set(0, 1u32, 0).context("enable interface filter")?;
+        filter.apply(&ifaces).context("apply startup --iface filter")?;
         println!(
             "bindfetto: in-kernel interface filter active — keeping {}: {}",
             ifaces.len(),
@@ -265,12 +397,26 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Control channel (Track C): serve the observed-interface list and accept live filter
+    // updates. Only when `--control` is given do we track observed interfaces.
+    let observed = control_port.map(|_| Arc::new(Mutex::new(BTreeSet::<String>::new())));
+    if let Some(port) = control_port {
+        let shared = Arc::new(control::Shared {
+            observed: observed.clone().unwrap(),
+            filter: Arc::new(Mutex::new(filter)),
+        });
+        control::serve(port, shared)
+            .await
+            .with_context(|| format!("bind control server on port {port}"))?;
+        println!("bindfetto: control channel on 0.0.0.0:{port} (LIST/GET/SET/CLEAR)");
+    }
+
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
     let mut async_ring = AsyncFd::new(ring)?;
     let mut names = NameCache::default();
     // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
     let boot_offset_ns = monotonic_to_realtime_offset_ns();
-    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl, dlt);
+    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl, dlt, observed);
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
@@ -318,6 +464,10 @@ struct Emitter {
     boot_offset_ns: i128,
     jsonl: Option<BufWriter<fs::File>>,
     dlt: Option<DltState>,
+    /// Shared set of every interface descriptor seen, for the control channel's `LIST`.
+    observed: Option<Arc<Mutex<BTreeSet<String>>>>,
+    /// Interfaces already published to `observed`, to skip the shared lock on repeats.
+    seen: HashSet<String>,
     core: String,
     scratch: String,
     json: String,
@@ -329,12 +479,15 @@ impl Emitter {
         boot_offset_ns: i128,
         jsonl: Option<BufWriter<fs::File>>,
         dlt: Option<DltState>,
+        observed: Option<Arc<Mutex<BTreeSet<String>>>>,
     ) -> Self {
         Self {
             sink,
             boot_offset_ns,
             jsonl,
             dlt,
+            observed,
+            seen: HashSet::new(),
             core: String::new(),
             scratch: String::new(),
             json: String::new(),
@@ -343,6 +496,17 @@ impl Emitter {
 
     /// Emit one transaction to every configured sink.
     fn emit(&mut self, ev: &TxEvent, names: &mut NameCache) {
+        // Record the interface for control-channel discovery. Only the first sighting of
+        // each descriptor takes the shared lock; repeats hit the local `seen` set.
+        if self.observed.is_some() {
+            self.scratch.clear();
+            if write_iface(&mut self.scratch, ev) && self.seen.insert(self.scratch.clone()) {
+                if let Some(obs) = &self.observed {
+                    obs.lock().unwrap().insert(self.scratch.clone());
+                }
+            }
+        }
+
         self.core.clear();
         format_core(&mut self.core, ev, names);
         if self.sink.console() {
