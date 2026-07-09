@@ -3,14 +3,19 @@ package com.bindfetto.control
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -29,15 +35,21 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -51,6 +63,7 @@ enum class Tab { CONTROL, FILTER, DEPLOY }
 data class UiState(
     val host: String = "127.0.0.1",
     val port: String = "3491",
+    val advancedOpen: Boolean = false,
     val tab: Tab = Tab.CONTROL,
     val status: Map<String, String> = emptyMap(),
     val interfaces: List<String> = emptyList(),
@@ -73,6 +86,7 @@ class ControlViewModel : ViewModel() {
 
     fun setHost(v: String) = update { it.copy(host = v) }
     fun setPort(v: String) = update { it.copy(port = v.filter(Char::isDigit)) }
+    fun toggleAdvanced() = update { it.copy(advancedOpen = !it.advancedOpen) }
 
     private fun client(): ControlClient? {
         val p = _state.value.port.toIntOrNull() ?: return null
@@ -106,7 +120,10 @@ class ControlViewModel : ViewModel() {
     fun refreshStatus() = run("Loading status…") { c ->
         val s = c.status()
         update { it.copy(status = s) }
-        if (s.isEmpty()) "No status" else "capturing=${s["capturing"]} • sink=${s["sink"]} • dlt=${s["dlt"]}"
+        // The status card shows the state; keep the message line to non-duplicative
+        // connection feedback only.
+        if (s.isEmpty()) "No response from ${_state.value.host}:${_state.value.port}"
+        else "Connected · ${_state.value.host}:${_state.value.port}"
     }
 
     fun setCapturing(on: Boolean) = run(if (on) "Starting…" else "Stopping…") { c ->
@@ -198,8 +215,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) { AppScreen() }
+            BindfettoTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) { AppScreen() }
             }
         }
     }
@@ -209,9 +229,39 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppScreen(vm: ControlViewModel = viewModel()) {
     val s by vm.state
-    Scaffold(topBar = { TopAppBar(title = { Text("bindfetto control") }) }) { pad ->
+    // Pull status once on launch so the app is usable without any "connect" step.
+    LaunchedEffect(Unit) { vm.refreshStatus() }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(R.drawable.bindfetto_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("bindfetto", fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.primary,
+                ),
+                actions = {
+                    TextButton(onClick = vm::refreshStatus, enabled = !s.busy) { Text("Refresh") }
+                    TextButton(onClick = vm::toggleAdvanced) {
+                        Text(if (s.advancedOpen) "Advanced ▾" else "Advanced ▸")
+                    }
+                },
+            )
+        },
+    ) { pad ->
         Column(modifier = Modifier.fillMaxSize().padding(pad)) {
-            ConnectionBar(s, vm)
+            if (s.advancedOpen) ConnectionBar(s, vm)
             TabRow(selectedTabIndex = s.tab.ordinal) {
                 Tab(selected = s.tab == Tab.CONTROL, onClick = { vm.selectTab(Tab.CONTROL) },
                     text = { Text("Control") })
@@ -233,6 +283,8 @@ fun AppScreen(vm: ControlViewModel = viewModel()) {
 
 @Composable
 private fun ConnectionBar(s: UiState, vm: ControlViewModel) {
+    // The app connects to bindfetto on the same device, so host is almost always
+    // localhost; only the --control port ever varies. Hidden behind "Advanced".
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -242,45 +294,94 @@ private fun ConnectionBar(s: UiState, vm: ControlViewModel) {
         Spacer(Modifier.width(8.dp))
         OutlinedTextField(s.port, vm::setPort, label = { Text("Port") },
             modifier = Modifier.width(96.dp), singleLine = true)
-        Spacer(Modifier.width(8.dp))
-        Button(onClick = vm::refreshStatus, enabled = !s.busy) { Text("Connect") }
     }
 }
 
 @Composable
 private fun ControlTab(s: UiState, vm: ControlViewModel) {
+    val connected = s.status.isNotEmpty()
     val capturing = s.status["capturing"] == "on"
     val dltOn = s.status["dlt"] == "on"
-    val sink = s.status["sink"] ?: "?"
+    val sink = s.status["sink"] ?: "console"
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Card {
-            Column(Modifier.padding(12.dp)) {
-                Text("Status", style = MaterialTheme.typography.titleMedium)
-                if (s.status.isEmpty()) Text("— tap Connect —")
-                else s.status.forEach { (k, v) ->
-                    Text("$k = $v", fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall)
+        // Capture state pill + Start/Stop. The pill (not a duplicate key=value line) is
+        // the single readout for capture; the counts card below shows the rest.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(
+                color = when {
+                    !connected -> MaterialTheme.colorScheme.outline
+                    capturing -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.tertiary
+                }
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (!connected) "Not connected" else if (capturing) "Capturing" else "Paused",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.weight(1f))
+            Button(onClick = { vm.setCapturing(true) }, enabled = !s.busy && !capturing) { Text("Start") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = { vm.setCapturing(false) }, enabled = !s.busy && capturing) { Text("Stop") }
+        }
+
+        Section("Sink") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("console", "logcat", "both", "none").forEach { m ->
+                    FilterChip(selected = sink == m, onClick = { vm.setSink(m) }, label = { Text(m) })
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { vm.setCapturing(true) }, enabled = !s.busy && !capturing) { Text("Start") }
-            OutlinedButton(onClick = { vm.setCapturing(false) }, enabled = !s.busy && capturing) { Text("Stop") }
-        }
-        Text("Sink", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("console", "logcat", "both", "none").forEach { m ->
-                FilterChip(selected = sink == m, onClick = { vm.setSink(m) }, label = { Text(m) })
+
+        Section("DLT streaming") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (dltOn) "Streaming to DLT (port ${s.status["dlt_port"] ?: "?"})" else "Off",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.weight(1f))
+                Switch(checked = dltOn, onCheckedChange = { vm.setDlt(it) }, enabled = !s.busy)
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("DLT streaming")
-            Spacer(Modifier.width(12.dp))
-            Switch(checked = dltOn, onCheckedChange = { vm.setDlt(it) }, enabled = !s.busy)
+
+        ElevatedCard {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Counts", style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary)
+                StatRow("Filter", s.status["filter"]?.let { "$it interfaces" } ?: "—")
+                StatRow("Captured", s.status["captured"] ?: "—")
+                StatRow("Emitted", s.status["emitted"] ?: "—")
+            }
         }
+    }
+}
+
+@Composable
+private fun StatusDot(color: androidx.compose.ui.graphics.Color) {
+    Box(Modifier.size(12.dp).clip(RoundedCornerShape(6.dp)).background(color))
+}
+
+@Composable
+private fun Section(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary)
+        content()
+    }
+}
+
+@Composable
+private fun StatRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
     }
 }
 
