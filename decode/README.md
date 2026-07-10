@@ -35,7 +35,7 @@ bindfetto-decode --catalog catalog.json capture.log
 ```
 
 The catalog JSON is `interface → { code → method }` (produced by the Track B1 Python
-builder, not yet built):
+builder in [`catalog/`](../catalog)):
 
 ```json
 { "android.app.IActivityManager": { "1": "getTasks", "7": "startActivity" } }

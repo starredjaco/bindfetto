@@ -3,12 +3,14 @@
 The on-device half of bindfetto: an [`aya`](https://aya-rs.dev) eBPF probe that
 captures Binder transactions and a Rust userspace consumer that drains them.
 
-> **Build status.** The whole runtime compiles: the **eBPF probe** for
+> **Build status.** The whole runtime compiles and runs: the **eBPF probe** for
 > `bpfel-unknown-none` and the **userspace consumer** for `aarch64-linux-android`
 > (with the eBPF object embedded via `aya-build`), against aya 0.13.1 / aya-ebpf
-> 0.1.1 with NDK r30. It has **not been run on a device yet** — the tracepoint field
-> offsets in the probe are still placeholders (see below). `aya` is Linux-only, so
-> the consumer only builds for the Android target, not the macOS host.
+> 0.1.1 with NDK r30. **Verified live on an arm64 AVD** (milestones M1–M5): real
+> binder capture, interface descriptors, in-kernel filtering, error events, and every
+> sink. `aya` is Linux-only, so the consumer only builds for the Android target, not
+> the macOS host. The tracepoint field offsets are set for the dev AVD kernel —
+> re-check them on a different device (see below).
 
 ## Layout
 
@@ -47,7 +49,8 @@ adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
 ```
 
 > The offsets in `bindfetto-ebpf/src/main.rs` (`OFF_TO_PROC`, `OFF_CODE`,
-> `OFF_FLAGS`) are placeholders — set them from that `format` output.
+> `OFF_FLAGS`) are set for the dev AVD kernel — confirm them against that `format`
+> output when moving to a different device/kernel.
 
 ## Build & run (Milestone 1)
 
@@ -81,7 +84,9 @@ offline against the AIDL catalog — a later milestone.
 | `--jsonl <path>` | Also write one JSON object per transaction to `<path>`. Composes with any sink. |
 | `--dlt-serve [port]` | Be a DLT TCP server (default 3490); DLT Viewer connects as a TCP ECU for live trace. |
 | `--iface <name>` | **In-kernel** interface filter: keep only these descriptors, dropping the rest in the probe before the ring buffer. Repeatable and comma-separated (`--iface a.b.IFoo --iface a.c.IBar,a.c.IBaz`). Match is exact (full descriptor), so `IVehicle` does not match `IVehicleCallback`. While a filter is active, transactions with no interface token (replies already excluded, special/native transactions) also drop. |
-| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
+| `--errors [on\|off]` | Capture transaction errors (`BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY`) via a second `binder:binder_return` attach point, off by default. Each error names the failing source → target, interface and method, and (best-effort) the concrete errno decoded from the kernel `failed_transaction_log`. Toggleable live over the control channel. |
+| `--include-replies` | Keep normal (successful) replies, which are otherwise dropped in the probe before the ring buffer. |
+| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `ERRORS on\|off` (error capture); `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
 
 ```sh
 # Keep only PowerManager + ActivityManager traffic, stream to DLT Viewer, no console

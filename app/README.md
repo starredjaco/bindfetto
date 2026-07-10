@@ -22,15 +22,18 @@ protocol is reachable via `adb forward tcp:3491 tcp:3491` and any TCP client.
 
 - **Control** — Connect + a live `STATUS` readout (capturing, sink, DLT, filter size,
   captured/emitted counts); **Start/Stop** capture; a **sink** selector
-  (console/logcat/both/none); a **DLT streaming** switch.
+  (console/logcat/both/none); a **DLT streaming** switch; an **error-capture** switch
+  (`ERRORS on|off` — BR_FAILED/DEAD_REPLY).
 - **Filter** (used rarely) — opening the tab enables interface **discovery** (`TRACK on`)
-  and loads the observed interfaces as a checkbox list with the active filter pre-checked;
+  and loads the observed interfaces as a checkbox list with the active filter pre-checked.
+  A single field **filters the list live and adds** a not-yet-seen descriptor by hand;
   **Apply** pushes the selection into the in-kernel filter, **Clear** disables it. Leaving
   the tab disables discovery (`TRACK off`) — nothing is tracked until you ask, so the
   runtime carries no discovery overhead otherwise.
 - **Deploy** — **Deploy & launch** extracts the bundled binary and tries to place+run it
-  via `su`; when the app lacks root/signature privilege it prints the `adb push` fallback
-  to run yourself.
+  via `su`, launching it **detached** (`setsid nohup … &`) so the `--control` daemon
+  outlives the `su` process; when the app lacks root/signature privilege it prints the
+  `adb push` fallback to run yourself.
 
 Client logic is a thin wrapper over the runtime's line protocol; see
 `app/src/main/java/com/bindfetto/control/ControlClient.kt`.
@@ -54,6 +57,5 @@ Launch **bindfetto control**, tap **Connect**.
 ## Scope / TODO
 
 Deploy's privileged path can't be exercised on a normal debug build (needs platform
-signing or root); it falls back to adb. Still to come: an error-capture toggle (needs the
-runtime's `BR_FAILED_REPLY`/`BR_DEAD_REPLY` attach point) and unix-socket + `SO_PEERCRED`
-hardening (currently TCP/localhost for testability).
+signing or root); it falls back to adb. Still to come: unix-socket + `SO_PEERCRED`
+hardening of the control channel (currently TCP/localhost for testability).
