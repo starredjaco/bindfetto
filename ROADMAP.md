@@ -24,7 +24,7 @@ Vertical slices; each one runs on the AVD before the next starts.
   `--iface <name>` (repeatable, comma-separated). Verified live on the AVD: exact match
   (filtering `IVehicle` does not leak `IVehicleCallback`); tokenless/special transactions
   drop while a filter is active.
-- **M5 — errors + sinks + CLI.** In progress.
+- **M5 — errors + sinks + CLI.** ✅ **Done.**
   - ✅ Console sink with wall-clock timestamp.
   - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
   - ✅ File / JSONL sink (`--jsonl <path>`, composes with any `--sink`; one JSON object
@@ -34,9 +34,28 @@ Vertical slices; each one runs on the AVD before the next starts.
     connects as a TCP ECU and shows them live with no libdlt and no dlt-daemon. Wire
     format verified against DLT Viewer's `qdlt` parser (synthetic + a real on-device
     streamed message); server verified live on the AVD.
-  - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
+  - ✅ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY`: a
+    `binder:binder_return` tracepoint that watches the return `cmd`, gated by the
+    `ERRORS_ON` flag map (off by default). Errors are correlated per-thread to the
+    failing transaction via a `LAST_TX` map, so an error line names the source → target,
+    interface and method: `… ISessionControllerCallback.[code:3] !! BR_DEAD_REPLY`.
+  - ✅ **Concrete failure reason.** The coarse `BR_*` code alone doesn't say *why*
+    (`BR_FAILED_REPLY` collapses buffer-full, security denial, oversized, bad handle…).
+    Each captured transaction carries its `debug_id` (from the tracepoint) through to the
+    error event; the consumer matches it against the kernel's binder
+    `failed_transaction_log` to recover the concrete errno (`return_error_param`) and
+    decodes it: `… !! BR_DEAD_REPLY (dead node, -3)`, `… !! BR_FAILED_REPLY (target
+    buffer full, -28)`. Added to the JSONL as `"errno"`/`"reason"`. Best-effort — that
+    kernel log is a ~32-entry ring shared across all binder failures, so under a failure
+    *storm* an entry can rotate out before we sample it (an accumulating cache softens
+    this); sparse/real failures decode reliably. Verified live on the AVD: real
+    `BR_DEAD_REPLY (dead node, -3)` lines in console + JSONL; the device log also carries
+    `-28` (buffer full), `-22` (invalid transaction) and `0` (frozen), all via the same
+    path.
   - ✅ Interface filter CLI (`--iface`) — wired to the M4 in-kernel filter above.
-  - ⏳ Full CLI (`--include-replies`, error toggle).
+  - ✅ Full CLI: `--errors [on|off]` (also toggled live via the control channel's
+    `ERRORS on|off` and shown in `STATUS`), and `--include-replies` (keeps normal replies
+    that are otherwise dropped before the ring buffer). Both verified live.
 
 ## Track B — offline decode
 
@@ -83,6 +102,7 @@ Vertical slices; each one runs on the AVD before the next starts.
   Verified end-to-end on the AVD (headless via `uiautomator dump` + `input tap`): every
   Control action round-trips through STATUS; discovery toggles with the Filter tab; Apply
   narrows the in-kernel capture; Deploy falls back to adb (no root/signature on a debug
-  build). Still TODO: error-capture toggle (needs M5); verified privileged deploy.
+  build). The Control tab now also carries an **Error capture** switch (`ERRORS on|off`,
+  M5). Still TODO: verified privileged deploy.
 
 Tracks B and C start once Track A produces stable output (≈after M3).

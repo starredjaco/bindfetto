@@ -18,6 +18,24 @@ pub const MAX_IFACE_BYTES: usize = 256;
 /// marks a transaction that begins with an interface descriptor.
 pub const IFACE_HEADER_MAGIC: u32 = 0x5359_5354;
 
+// Binder return protocol error codes we surface (the second attach point, M5).
+// These are the `cmd` values carried by the `binder:binder_return` tracepoint —
+// `_IO('r', n)` = `0x7200 | n`, matching the low byte the kernel uses as an index into
+// its `binder_return_strings` table. Only these two are real transaction *failures*;
+// `BR_FROZEN_REPLY` is the frozen-target variant of a failed reply (kernels ≥ 5.15).
+/// `BR_DEAD_REPLY` — the target of a transaction died before it could reply.
+pub const BR_DEAD_REPLY: u32 = 0x7205; // _IO('r', 5)
+/// `BR_FAILED_REPLY` — the transaction failed (security denial, bad handle, oversized …).
+pub const BR_FAILED_REPLY: u32 = 0x7211; // _IO('r', 17)
+/// `BR_FROZEN_REPLY` — the target process was frozen (cached), so the reply failed.
+pub const BR_FROZEN_REPLY: u32 = 0x7212; // _IO('r', 18)
+
+/// True for the binder return `cmd` values bindfetto reports as transaction errors.
+#[inline]
+pub fn is_error_return(cmd: u32) -> bool {
+    matches!(cmd, BR_DEAD_REPLY | BR_FAILED_REPLY | BR_FROZEN_REPLY)
+}
+
 /// Key for the in-kernel interface filter map (`WANTED`): a zero-padded UTF-16LE
 /// interface descriptor, byte-identical to the bytes the probe captures into
 /// [`TxEvent::iface`]. Using the full descriptor as the key is collision-free, so the
@@ -48,6 +66,18 @@ pub struct TxEvent {
     pub reply: u32,
     /// Parcel payload size in bytes.
     pub data_size: u32,
+    /// 0 for a normal transaction; otherwise the binder return `cmd` of a captured
+    /// error (`BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY`). For an error event
+    /// the src/dst/code/iface describe the *failing* transaction, correlated per-thread.
+    pub err_code: u32,
+    /// The binder transaction `debug_id` from the tracepoint — a per-transaction id the
+    /// kernel also records in its `failed_transaction_log`. The consumer matches an error
+    /// event against that log by `debug_id` to recover the *concrete* failure errno
+    /// (e.g. `-ENOSPC` = target buffer full) that the coarse `BR_*` code alone doesn't
+    /// carry. Also keeps the post-`ts_ns` u32 count even so the struct has no *implicit*
+    /// tail padding — the probe copies the whole struct into the ring buffer and the BPF
+    /// verifier rejects reading uninitialized padding bytes.
+    pub debug_id: i32,
     /// Valid bytes in [`iface`] (UTF-16LE); 0 when the transaction carries no
     /// interface descriptor (replies, special transactions, unreadable buffer).
     pub iface_byte_len: u32,
@@ -60,6 +90,12 @@ impl TxEvent {
     #[inline]
     pub fn is_oneway(&self) -> bool {
         self.flags & TF_ONE_WAY != 0
+    }
+
+    /// True if this event is a captured transaction error rather than a transaction.
+    #[inline]
+    pub fn is_error(&self) -> bool {
+        self.err_code != 0
     }
 }
 

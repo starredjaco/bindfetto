@@ -26,6 +26,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -43,12 +44,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -138,6 +142,10 @@ class ControlViewModel : ViewModel() {
         val r = c.setDlt(on); refreshStatus(); r
     }
 
+    fun setErrors(on: Boolean) = run("Errors → $on") { c ->
+        val r = c.setErrors(on); refreshStatus(); r
+    }
+
     // --- Filter tab ------------------------------------------------------------------
     private fun startDiscovery() = run("Starting discovery…") { c ->
         c.setTracking(true)
@@ -163,6 +171,18 @@ class ControlViewModel : ViewModel() {
         val next = it.selected.toMutableSet()
         if (!next.add(iface)) next.remove(iface)
         it.copy(selected = next)
+    }
+
+    /** Add a manually-typed interface descriptor to the list and select it. */
+    fun addInterface(raw: String) {
+        val iface = raw.trim()
+        if (iface.isEmpty()) return
+        update {
+            it.copy(
+                interfaces = (it.interfaces + iface).distinct().sorted(),
+                selected = it.selected + iface,
+            )
+        }
     }
 
     fun applyFilter() = run("Applying…") { c ->
@@ -192,8 +212,12 @@ class ControlViewModel : ViewModel() {
         val sb = StringBuilder("bundled binary: $bin\n")
         sb.append(if (present) "  present\n\n" else "  MISSING — build the runtime, then rebuild the app\n\n")
         if (present) {
+            // Detach the daemon (setsid + nohup, output to a log) so it outlives this `su`
+            // process — a bare `&` would share su's process group and die when su exits,
+            // leaving nothing on the control port for the app to connect to.
             val cmd = "cp $bin /data/local/tmp/bindfetto && chmod 755 /data/local/tmp/bindfetto && " +
-                "setenforce 0 && /data/local/tmp/bindfetto --control $port --sink none &"
+                "setenforce 0 && setsid nohup /data/local/tmp/bindfetto --control $port --sink none " +
+                "</dev/null >/data/local/tmp/bindfetto.log 2>&1 &"
             try {
                 val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 val code = p.waitFor()
@@ -205,7 +229,7 @@ class ControlViewModel : ViewModel() {
         }
         sb.append("Fallback — push + run from your bindfetto checkout:\n")
         sb.append("  adb push runtime/target/aarch64-linux-android/release/bindfetto /data/local/tmp/\n")
-        sb.append("  adb shell 'setenforce 0; /data/local/tmp/bindfetto --control $port --sink none &'\n")
+        sb.append("  adb shell 'setenforce 0; setsid nohup /data/local/tmp/bindfetto --control $port --sink none >/data/local/tmp/bindfetto.log 2>&1 &'\n")
         sb.append("  adb forward tcp:$port tcp:$port")
         return sb.toString()
     }
@@ -270,8 +294,12 @@ fun AppScreen(vm: ControlViewModel = viewModel()) {
                 Tab(selected = s.tab == Tab.DEPLOY, onClick = { vm.selectTab(Tab.DEPLOY) },
                     text = { Text("Deploy") })
             }
-            Text(s.message, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                style = MaterialTheme.typography.bodyMedium)
+            // Control + Filter tabs show the status inline (next to their action buttons)
+            // to save vertical space; other tabs keep it here on top.
+            if (s.tab != Tab.FILTER && s.tab != Tab.CONTROL) {
+                Text(s.message, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.bodyMedium)
+            }
             when (s.tab) {
                 Tab.CONTROL -> ControlTab(s, vm)
                 Tab.FILTER -> FilterTab(s, vm)
@@ -302,6 +330,7 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
     val connected = s.status.isNotEmpty()
     val capturing = s.status["capturing"] == "on"
     val dltOn = s.status["dlt"] == "on"
+    val errorsOn = s.status["errors"] == "on"
     val sink = s.status["sink"] ?: "console"
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
@@ -310,6 +339,16 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
         // Capture state pill + Start/Stop. The pill (not a duplicate key=value line) is
         // the single readout for capture; the counts card below shows the rest.
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Status inline (was the top line), left of the capture pill — same size as it.
+            Text(
+                s.message,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(12.dp))
             StatusDot(
                 color = when {
                     !connected -> MaterialTheme.colorScheme.outline
@@ -323,7 +362,7 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(12.dp))
             Button(onClick = { vm.setCapturing(true) }, enabled = !s.busy && !capturing) { Text("Start") }
             Spacer(Modifier.width(8.dp))
             OutlinedButton(onClick = { vm.setCapturing(false) }, enabled = !s.busy && capturing) { Text("Stop") }
@@ -346,6 +385,18 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
                 )
                 Spacer(Modifier.weight(1f))
                 Switch(checked = dltOn, onCheckedChange = { vm.setDlt(it) }, enabled = !s.busy)
+            }
+        }
+
+        Section("Error capture") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (errorsOn) "Reporting BR_FAILED/DEAD_REPLY" else "Off",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.weight(1f))
+                Switch(checked = errorsOn, onCheckedChange = { vm.setErrors(it) }, enabled = !s.busy)
             }
         }
 
@@ -387,14 +438,47 @@ private fun StatRow(label: String, value: String) {
 
 @Composable
 private fun FilterTab(s: UiState, vm: ControlViewModel) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(modifier = Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = vm::reload, enabled = !s.busy) { Text("Reload") }
-            Button(onClick = vm::applyFilter, enabled = !s.busy) { Text("Apply filter") }
+    var query by remember { mutableStateOf("") }
+    val q = query.trim()
+    val shown = if (q.isEmpty()) s.interfaces
+                else s.interfaces.filter { it.contains(q, ignoreCase = true) }
+    // Show Add only for a query that isn't already an entry (so it doubles as "add custom").
+    val canAdd = q.isNotEmpty() && s.interfaces.none { it.equals(q, ignoreCase = true) }
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
+        // One field: filters the list live, and adds a not-yet-listed descriptor.
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Filter or add interface") },
+            placeholder = { Text("android.os.IPowerManager") },
+            singleLine = true,
+            textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+            trailingIcon = {
+                when {
+                    canAdd -> TextButton(onClick = { vm.addInterface(q); query = "" }) { Text("Add") }
+                    query.isNotEmpty() -> TextButton(onClick = { query = "" }) { Text("Clear") }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                s.message,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Button(onClick = vm::applyFilter, enabled = !s.busy) { Text("Apply") }
             OutlinedButton(onClick = vm::clearFilter, enabled = !s.busy) { Text("Clear") }
+            TextButton(onClick = vm::reload, enabled = !s.busy) { Text("Reload") }
         }
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(s.interfaces) { iface ->
+            items(shown) { iface ->
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = iface in s.selected, onCheckedChange = { vm.toggle(iface) })

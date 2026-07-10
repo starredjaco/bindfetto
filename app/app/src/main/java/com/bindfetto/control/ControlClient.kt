@@ -17,6 +17,7 @@ import java.net.Socket
  *  * `START`/`STOP` -> toggle capture; reply `OK`.
  *  * `SINK <mode>` -> switch text sink; reply `OK`/`ERR`.
  *  * `DLT on|off`  -> toggle DLT streaming; reply `OK`.
+ *  * `ERRORS on|off`-> toggle error capture (BR_FAILED/DEAD_REPLY); reply `OK`.
  *  * `TRACK on|off`-> toggle interface discovery; reply `OK`.
  *  * `LIST`        -> every interface descriptor seen so far, one per line, then `END`.
  *  * `GET`         -> the interfaces in the active filter, one per line, then `END`.
@@ -51,6 +52,9 @@ class ControlClient(private val host: String, private val port: Int) {
 
     /** Toggle DLT streaming (`DLT on|off`). */
     suspend fun setDlt(on: Boolean): String = simple("DLT " + if (on) "on" else "off")
+
+    /** Toggle error capture (`ERRORS on|off`). */
+    suspend fun setErrors(on: Boolean): String = simple("ERRORS " + if (on) "on" else "off")
 
     /** Toggle interface discovery (`TRACK on|off`). */
     suspend fun setTracking(on: Boolean): String = simple("TRACK " + if (on) "on" else "off")

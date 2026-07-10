@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
-//! Bindfetto probe (M1–M3).
+//! Bindfetto probe (M1–M5).
 //!
-//! Two attach points, correlated per-thread:
+//! Three attach points, correlated per-thread:
 //!
 //! * **kprobe on `binder_transaction()`** — runs at function entry, reads the
 //!   parcel size and the interface descriptor from the `binder_transaction_data`
@@ -11,6 +11,10 @@
 //! * **tracepoint `binder:binder_transaction`** — runs later inside the same call,
 //!   reads the target pid / code / flags, pulls the stashed size+descriptor, and
 //!   emits a [`TxEvent`] to the ring buffer.
+//! * **tracepoint `binder:binder_return`** — the return/error path (M5). When error
+//!   capture is enabled it watches for `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/
+//!   `BR_FROZEN_REPLY` and emits an error [`TxEvent`], correlating it to the calling
+//!   thread's last captured transaction via [`LAST_TX`].
 
 use aya_ebpf::{
     helpers::{
@@ -21,7 +25,9 @@ use aya_ebpf::{
     maps::{Array, HashMap, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
-use bindfetto_common::{IfaceKey, TxEvent, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES};
+use bindfetto_common::{
+    is_error_return, IfaceKey, TxEvent, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES,
+};
 
 /// Ring buffer to userspace.
 #[map]
@@ -43,6 +49,28 @@ static WANTED: HashMap<IfaceKey, u8> = HashMap::with_max_entries(256, 0);
 #[map]
 static FILTER_ON: Array<u32> = Array::with_max_entries(1, 0);
 
+/// One-element enable flag for error capture (element 0: 0 = off, non-0 = on). Off by
+/// default (per SPEC); toggled by `--errors` / the control app. Gates both the
+/// `binder_return` attach point and the per-thread [`LAST_TX`] bookkeeping.
+#[map]
+static ERRORS_ON: Array<u32> = Array::with_max_entries(1, 0);
+
+/// One-element flag: when non-0, normal (successful) replies are captured too instead of
+/// being dropped before the ring buffer. Set once at startup from `--include-replies`.
+#[map]
+static INCLUDE_REPLIES: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Per-thread copy of the last captured (kept) outgoing transaction, keyed by pid_tgid.
+/// Written by the transaction tracepoint only while error capture is on, and read by the
+/// `binder_return` attach point to correlate a `BR_*_REPLY` failure back to the
+/// transaction that provoked it (same thread: the sender's `BINDER_WRITE_READ` does the
+/// write then reads the error). Distinct from [`STASH`], which the transaction tracepoint
+/// consumes-and-removes; this one persists across the return path. Stores the whole
+/// [`TxEvent`] so it can be inserted by reference — building a separate correlation struct
+/// would put a second 256-byte descriptor on the 512-byte BPF stack.
+#[map]
+static LAST_TX: HashMap<u64, TxEvent> = HashMap::with_max_entries(10240, 0);
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Stash {
@@ -55,10 +83,14 @@ struct Stash {
 }
 
 // --- binder:binder_transaction tracepoint field offsets (from the format file) ---
+const OFF_DEBUG_ID: usize = 8;
 const OFF_TO_PROC: usize = 16;
 const OFF_REPLY: usize = 24;
 const OFF_CODE: usize = 28;
 const OFF_FLAGS: usize = 32;
+
+// --- binder:binder_return tracepoint field offset (from the format file) ---
+const OFF_RETURN_CMD: usize = 8; // uint32_t cmd
 
 // --- struct binder_transaction_data offsets (UAPI, 64-bit) ---
 const TR_DATA_SIZE: usize = 32; // binder_size_t data_size
@@ -76,11 +108,14 @@ pub fn binder_transaction_enter(ctx: ProbeContext) -> u32 {
 }
 
 fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
-    // arg3 = int reply. The tracepoint drops replies, so skip all their work here
-    // too (user-memory reads + stash insert) — replies are ~half of all traffic.
-    // Truncate to u32: the ABI doesn't guarantee the register's upper bits for int.
+    // arg3 = int reply. Unless `--include-replies` is set, the tracepoint drops replies,
+    // so skip all their work here too (user-memory reads + stash insert) — replies are
+    // ~half of all traffic. Truncate to u32: the ABI doesn't guarantee the register's
+    // upper bits for int.
     let reply: usize = ctx.arg(3).ok_or(1i64)?;
-    if reply as u32 != 0 {
+    let is_reply = reply as u32 != 0;
+    let include_replies = INCLUDE_REPLIES.get(0).copied().unwrap_or(0) != 0;
+    if is_reply && !include_replies {
         return Ok(());
     }
 
@@ -106,8 +141,9 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
 
     // The parcel data lives in the sender's userspace at buf_ptr. If it starts with
     // an interface token, offset 8 holds the 'SYST' magic. A parcel smaller than the
-    // token header (16 bytes) can't carry one — don't even read the magic.
-    if data_size as usize >= P_STR {
+    // token header (16 bytes) can't carry one — don't even read the magic. Replies
+    // (only reachable here under `--include-replies`) never carry a token, so skip it.
+    if !is_reply && data_size as usize >= P_STR {
         let magic = unsafe { bpf_probe_read_user((buf_ptr + P_MAGIC) as *const u32) }.unwrap_or(0);
         if magic == IFACE_HEADER_MAGIC {
             let units =
@@ -169,8 +205,8 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     let reply = unsafe { ctx.read_at::<i32>(OFF_REPLY) }? as u32;
     // Normal (successful) replies are noise — a code:0 ack per call. Drop them here,
     // before the ring buffer, still clearing the per-thread stash. Error replies come
-    // from a separate attach point (M5). An --include-replies flag can re-enable them.
-    if reply != 0 {
+    // from the binder_return attach point (M5). `--include-replies` re-enables them.
+    if reply != 0 && INCLUDE_REPLIES.get(0).copied().unwrap_or(0) == 0 {
         let _ = STASH.remove(&pid_tgid);
         return Ok(());
     }
@@ -178,6 +214,7 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     let dst_pid = unsafe { ctx.read_at::<i32>(OFF_TO_PROC) }? as u32;
     let code = unsafe { ctx.read_at::<u32>(OFF_CODE) }?;
     let flags = unsafe { ctx.read_at::<u32>(OFF_FLAGS) }?;
+    let debug_id = unsafe { ctx.read_at::<i32>(OFF_DEBUG_ID) }?;
 
     let mut ev = TxEvent {
         ts_ns: unsafe { bpf_ktime_get_ns() },
@@ -188,6 +225,8 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
         flags,
         reply,
         data_size: 0,
+        err_code: 0,
+        debug_id,
         iface_byte_len: 0,
         iface: [0u8; MAX_IFACE_BYTES],
     };
@@ -205,6 +244,77 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     if !keep {
         return Ok(());
     }
+
+    // Error capture (M5): remember this kept, outgoing transaction so the binder_return
+    // path can name the source → target and method if it fails. Only while error capture
+    // is on (keeps the 256-byte descriptor copy off the hot path otherwise), and only for
+    // real transactions — a reply (only here under --include-replies) provokes no error.
+    // Insert `ev` by reference so no extra copy lands on the BPF stack.
+    if reply == 0 && ERRORS_ON.get(0).copied().unwrap_or(0) != 0 {
+        let _ = LAST_TX.insert(&pid_tgid, &ev, 0);
+    }
+
+    if let Some(mut entry) = EVENTS.reserve::<TxEvent>(0) {
+        entry.write(ev);
+        entry.submit(0);
+    }
+    Ok(())
+}
+
+/// Return/error path (M5). Fires for every binder return command written back to a
+/// thread; we act only on the transaction-failure ones and only while error capture is
+/// enabled. The failing thread is the current one, and its last captured transaction is
+/// in [`LAST_TX`], so we can name the source → target and method that failed.
+#[tracepoint(category = "binder", name = "binder_return")]
+pub fn binder_return(ctx: TracePointContext) -> u32 {
+    match try_return(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_return(ctx: &TracePointContext) -> Result<(), i64> {
+    if ERRORS_ON.get(0).copied().unwrap_or(0) == 0 {
+        return Ok(());
+    }
+    let cmd = unsafe { ctx.read_at::<u32>(OFF_RETURN_CMD) }?;
+    if !is_error_return(cmd) {
+        return Ok(());
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let mut ev = TxEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        src_pid: (pid_tgid >> 32) as u32,
+        src_tid: pid_tgid as u32,
+        dst_pid: 0,
+        code: 0,
+        flags: 0,
+        reply: 0,
+        data_size: 0,
+        err_code: cmd,
+        debug_id: 0,
+        iface_byte_len: 0,
+        iface: [0u8; MAX_IFACE_BYTES],
+    };
+    // Correlate to this thread's last captured transaction. No record → we weren't
+    // capturing that transaction (e.g. filtered out), so don't report an orphan error.
+    // Read the fields through the map reference (a single 256-byte descriptor copy into
+    // `ev`); materializing a whole `LastTx` on the stack alongside `ev` would blow the
+    // 512-byte BPF stack.
+    match unsafe { LAST_TX.get(&pid_tgid) } {
+        Some(last) => {
+            ev.dst_pid = last.dst_pid;
+            ev.code = last.code;
+            ev.debug_id = last.debug_id;
+            ev.iface_byte_len = last.iface_byte_len;
+            ev.iface = last.iface;
+        }
+        None => return Ok(()),
+    }
+    // One failure per transaction: drop the record so a later unrelated return on this
+    // thread can't re-attribute the same call.
+    let _ = LAST_TX.remove(&pid_tgid);
 
     if let Some(mut entry) = EVENTS.reserve::<TxEvent>(0) {
         entry.write(ev);

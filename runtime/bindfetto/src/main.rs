@@ -1,7 +1,8 @@
-//! Bindfetto userspace consumer (M1–M3).
+//! Bindfetto userspace consumer (M1–M5).
 //!
-//! Loads the probe, attaches the kprobe + tracepoint, drains the ring buffer, and
-//! emits one line per transaction to the selected sink:
+//! Loads the probe, attaches the kprobe + the two tracepoints (`binder_transaction`
+//! plus the `binder_return` error path), drains the ring buffer, and emits one line per
+//! transaction to the selected sink:
 //!
 //!   <name> (<pid>) -> <name> (<pid>): <interface>.[code:N], <size>B [oneway]
 //!
@@ -20,6 +21,13 @@
 //!   OEM logcat->DLT bridge or any dlt-daemon.
 //!
 //! Both compose with any `--sink` (use `--sink none` for a quiet, sink-only capture).
+//!
+//! Error capture (M5) is a separate, toggleable attach point (`--errors [on|off]`, off
+//! by default; also toggled live over the control channel): it reports
+//! `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY` correlated to the failing
+//! source → target, and — matched by transaction `debug_id` against the kernel's binder
+//! `failed_transaction_log` — the *concrete* failure errno (e.g. `-ENOSPC` = the target's
+//! binder buffer is full). `--include-replies` additionally keeps normal replies.
 
 mod dlt_wire;
 
@@ -35,7 +43,9 @@ use aya::{
     programs::{KProbe, TracePoint},
     Ebpf,
 };
-use bindfetto_common::{IfaceKey, TxEvent, MAX_IFACE_BYTES};
+use bindfetto_common::{
+    IfaceKey, TxEvent, BR_DEAD_REPLY, BR_FAILED_REPLY, BR_FROZEN_REPLY, MAX_IFACE_BYTES,
+};
 use tokio::io::unix::AsyncFd;
 
 // eBPF object built by build.rs (aya-build).
@@ -115,6 +125,16 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+/// Parse a boolean flag that may be bare or take an explicit `on`/`off` value
+/// (`--errors`, `--errors on`, `--errors off`). Absent → false; bare or a truthy value
+/// → true; `off`/`false`/`0` → false.
+fn flag_on_off(args: &[String], flag: &str) -> bool {
+    match args.iter().position(|a| a == flag) {
+        None => false,
+        Some(i) => !matches!(args.get(i + 1).map(String::as_str), Some("off" | "false" | "0")),
+    }
 }
 
 /// All interface names requested via `--iface`. Repeatable and comma-separated
@@ -278,6 +298,9 @@ struct RuntimeState {
     /// Whether transactions are streamed to the DLT server (`DLT on|off`). The server is
     /// bound once at startup; this only gates the fan-out.
     dlt_on: AtomicBool,
+    /// Whether error capture is on (`ERRORS on|off`); mirrors the ERRORS_ON BPF flag map
+    /// for cheap `STATUS` reads.
+    errors_on: AtomicBool,
     /// The DLT server's port (0 if no server was bound); reported by `STATUS`.
     dlt_port: u16,
     /// Total transactions drained from the ring buffer.
@@ -288,6 +311,8 @@ struct RuntimeState {
     observed: Mutex<BTreeSet<String>>,
     /// The in-kernel interface filter (`LIST`/`GET`/`SET`/`CLEAR`).
     filter: Mutex<FilterCtl>,
+    /// The ERRORS_ON BPF flag map, so `ERRORS on|off` can toggle error capture live.
+    errors: Mutex<Array<MapData, u32>>,
 }
 
 /// Control channel: a line-oriented TCP server the control app connects to (via
@@ -298,6 +323,7 @@ struct RuntimeState {
 /// * `START` / `STOP` -> toggle capture; reply `OK`.
 /// * `SINK console|logcat|both|none` -> switch the text sink; reply `OK`/`ERR`.
 /// * `DLT on|off` -> toggle DLT streaming; reply `OK`.
+/// * `ERRORS on|off` -> toggle error capture (BR_FAILED/DEAD_REPLY); reply `OK`.
 /// * `TRACK on|off` -> toggle interface discovery; reply `OK`.
 /// * `LIST` -> every interface descriptor seen so far, one per line, then `END`.
 /// * `GET`  -> the interfaces in the active filter, one per line, then `END`.
@@ -350,12 +376,13 @@ mod control {
                     let filter_n = state.filter.lock().unwrap().active.len();
                     let body = format!(
                         "capturing={}\ndiscovering={}\nsink={}\ndlt={}\ndlt_port={}\n\
-                         filter={}\ncaptured={}\nemitted={}\nEND\n",
+                         errors={}\nfilter={}\ncaptured={}\nemitted={}\nEND\n",
                         onoff(state.capturing.load(Ordering::Relaxed)),
                         onoff(state.discovering.load(Ordering::Relaxed)),
                         sink.name(),
                         onoff(state.dlt_on.load(Ordering::Relaxed)),
                         state.dlt_port,
+                        onoff(state.errors_on.load(Ordering::Relaxed)),
                         filter_n,
                         state.captured.load(Ordering::Relaxed),
                         state.emitted.load(Ordering::Relaxed),
@@ -387,6 +414,26 @@ mod control {
                         write.write_all(b"OK\n").await?;
                     }
                     None => write.write_all(b"ERR DLT needs on|off\n").await?,
+                },
+                "ERRORS" => match on_off(rest) {
+                    Some(on) => {
+                        // Flip the BPF flag map first; only reflect success in the atomic.
+                        let res = state
+                            .errors
+                            .lock()
+                            .unwrap()
+                            .set(0, u32::from(on), 0);
+                        match res {
+                            Ok(()) => {
+                                state.errors_on.store(on, Ordering::Relaxed);
+                                write.write_all(b"OK\n").await?;
+                            }
+                            Err(e) => {
+                                write.write_all(format!("ERR {e}\n").as_bytes()).await?;
+                            }
+                        }
+                    }
+                    None => write.write_all(b"ERR ERRORS needs on|off\n").await?,
                 },
                 "TRACK" => match on_off(rest) {
                     Some(on) => {
@@ -465,6 +512,16 @@ async fn main() -> anyhow::Result<()> {
     tp.attach("binder", "binder_transaction")
         .context("attach binder:binder_transaction (need root + BPF-permissive SELinux)")?;
 
+    // Second attach point (M5): the return/error path. Always attached; the probe itself
+    // no-ops unless error capture is enabled via the ERRORS_ON map.
+    let rp: &mut TracePoint = ebpf
+        .program_mut("binder_return")
+        .context("program `binder_return` missing")?
+        .try_into()?;
+    rp.load()?;
+    rp.attach("binder", "binder_return")
+        .context("attach binder:binder_return")?;
+
     let args: Vec<String> = std::env::args().collect();
     let sink = Sink::parse(&args);
     let jsonl = match arg_value(&args, "--jsonl") {
@@ -520,6 +577,34 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Error capture (M5): the ERRORS_ON flag map gates the binder_return attach point.
+    // Off by default (per SPEC); `--errors [on|off]` sets the startup state and the
+    // control channel can toggle it live, so keep the map handle in RuntimeState.
+    let errors_enabled = flag_on_off(&args, "--errors");
+    let mut errors_map: Array<MapData, u32> = Array::try_from(
+        ebpf.take_map("ERRORS_ON").context("ERRORS_ON map missing")?,
+    )?;
+    errors_map
+        .set(0, u32::from(errors_enabled), 0)
+        .context("set ERRORS_ON")?;
+    if errors_enabled {
+        println!("bindfetto: error capture on — reporting BR_FAILED_REPLY/BR_DEAD_REPLY");
+    }
+
+    // `--include-replies`: keep normal (successful) replies instead of dropping them
+    // before the ring buffer. Startup-only (a map so the probe reads it); set once here.
+    let include_replies = args.iter().any(|a| a == "--include-replies");
+    let mut include_map: Array<MapData, u32> = Array::try_from(
+        ebpf.take_map("INCLUDE_REPLIES")
+            .context("INCLUDE_REPLIES map missing")?,
+    )?;
+    include_map
+        .set(0, u32::from(include_replies), 0)
+        .context("set INCLUDE_REPLIES")?;
+    if include_replies {
+        println!("bindfetto: including replies in the capture");
+    }
+
     // Shared runtime state: capture on by default, discovery off (only tracked when the
     // app asks), sink from `--sink`, DLT streaming on iff `--dlt-serve` was explicit.
     let state = Arc::new(RuntimeState {
@@ -527,11 +612,13 @@ async fn main() -> anyhow::Result<()> {
         discovering: AtomicBool::new(false),
         sink: AtomicU8::new(sink.as_u8()),
         dlt_on: AtomicBool::new(dlt_explicit.is_some()),
+        errors_on: AtomicBool::new(errors_enabled),
         dlt_port: if dlt.is_some() { dlt_port } else { 0 },
         captured: AtomicU64::new(0),
         emitted: AtomicU64::new(0),
         observed: Mutex::new(BTreeSet::new()),
         filter: Mutex::new(filter),
+        errors: Mutex::new(errors_map),
     });
 
     if let Some(port) = control_port {
@@ -549,7 +636,15 @@ async fn main() -> anyhow::Result<()> {
     let mut names = NameCache::default();
     // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
     let boot_offset_ns = monotonic_to_realtime_offset_ns();
-    let mut emitter = Emitter::new(state, boot_offset_ns, jsonl, dlt);
+    // For decoding an error's concrete cause (errno) from the kernel's binder log.
+    let failed_log = FailedTxLog::resolve();
+    if errors_enabled && failed_log.is_none() {
+        println!(
+            "bindfetto: note — binder failed_transaction_log not found; \
+             errors will show the BR_* code without a concrete errno"
+        );
+    }
+    let mut emitter = Emitter::new(state, boot_offset_ns, jsonl, dlt, failed_log);
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
@@ -598,6 +693,9 @@ struct Emitter {
     boot_offset_ns: i128,
     jsonl: Option<BufWriter<fs::File>>,
     dlt: Option<DltState>,
+    /// The kernel's binder failed-transaction log, for decoding an error's concrete errno
+    /// (`None` if the log isn't available on this device).
+    failed_log: Option<FailedTxLog>,
     /// Interfaces already published to `state.observed`, to skip the shared lock on repeats.
     seen: HashSet<String>,
     core: String,
@@ -611,12 +709,14 @@ impl Emitter {
         boot_offset_ns: i128,
         jsonl: Option<BufWriter<fs::File>>,
         dlt: Option<DltState>,
+        failed_log: Option<FailedTxLog>,
     ) -> Self {
         Self {
             state,
             boot_offset_ns,
             jsonl,
             dlt,
+            failed_log,
             seen: HashSet::new(),
             core: String::new(),
             scratch: String::new(),
@@ -633,10 +733,24 @@ impl Emitter {
         }
         self.state.emitted.fetch_add(1, Ordering::Relaxed);
 
+        let is_error = ev.is_error();
+
+        // For an error, recover the concrete failure errno from the kernel's
+        // failed_transaction_log, matched by transaction debug_id (0/absent → none).
+        let errno = if is_error {
+            self.failed_log
+                .as_mut()
+                .and_then(|f| f.errno_for(ev.debug_id))
+                .filter(|&e| e != 0)
+        } else {
+            None
+        };
+
         // Record the interface for control-channel discovery, but only while discovery is
-        // on (default off). First sighting of each descriptor takes the shared lock;
-        // repeats hit the local `seen` set.
-        if self.state.discovering.load(Ordering::Relaxed) {
+        // on (default off) and for real transactions (an error re-reports an already-seen
+        // interface). First sighting of each descriptor takes the shared lock; repeats hit
+        // the local `seen` set.
+        if !is_error && self.state.discovering.load(Ordering::Relaxed) {
             self.scratch.clear();
             if write_iface(&mut self.scratch, ev) && self.seen.insert(self.scratch.clone()) {
                 self.state.observed.lock().unwrap().insert(self.scratch.clone());
@@ -644,7 +758,22 @@ impl Emitter {
         }
 
         self.core.clear();
-        format_core(&mut self.core, ev, names);
+        if is_error {
+            format_error(&mut self.core, ev, names);
+            if let Some(errno) = errno {
+                use std::fmt::Write as _;
+                match errno_reason(errno) {
+                    Some(reason) => {
+                        let _ = write!(self.core, " ({reason}, {errno})");
+                    }
+                    None => {
+                        let _ = write!(self.core, " (errno {errno})");
+                    }
+                }
+            }
+        } else {
+            format_core(&mut self.core, ev, names);
+        }
         let sink = Sink::from_u8(self.state.sink.load(Ordering::Relaxed));
         if sink.console() {
             self.scratch.clear();
@@ -687,13 +816,13 @@ impl Emitter {
             }
         }
         if self.jsonl.is_some() {
-            self.write_jsonl(ev, names);
+            self.write_jsonl(ev, names, errno);
         }
     }
 
     /// Append one JSONL record for `ev` to the file sink. The structured fields let
     /// offline decoders read them directly instead of re-parsing the pretty line.
-    fn write_jsonl(&mut self, ev: &TxEvent, names: &mut NameCache) {
+    fn write_jsonl(&mut self, ev: &TxEvent, names: &mut NameCache, errno: Option<i32>) {
         use std::fmt::Write as _;
 
         // Decode the interface into `scratch`; absent for replies / non-AIDL.
@@ -726,6 +855,20 @@ impl Emitter {
             j.push_str(",\"iface\":\"");
             json_escape(j, &self.scratch);
             j.push('"');
+        }
+        // Error events carry the human-readable binder return code; decoders can select
+        // them on the `error` key (absent for normal transactions). When the concrete
+        // failure errno was recovered, add it plus its decoded reason.
+        if ev.is_error() {
+            let _ = write!(j, ",\"error\":\"{}\"", br_error_name(ev.err_code));
+            if let Some(errno) = errno {
+                let _ = write!(j, ",\"errno\":{errno}");
+                if let Some(reason) = errno_reason(errno) {
+                    j.push_str(",\"reason\":\"");
+                    json_escape(j, reason);
+                    j.push('"');
+                }
+            }
         }
         j.push('}');
 
@@ -763,15 +906,15 @@ fn json_escape(out: &mut String, s: &str) {
     }
 }
 
-/// Write the shared, sink-independent line into `out`:
-/// `src (pid) -> dst (pid): <label>, <size>B`.
-fn format_core(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
+/// Write `src (pid) -> dst (pid): <label>` into `out`, where `<label>` is the interface
+/// + raw code, a reply marker, or a non-AIDL marker. Shared by the transaction line
+/// ([`format_core`]) and the error line ([`format_error`]).
+fn write_label(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
     use std::fmt::Write as _;
     names.ensure(ev.src_pid);
     names.ensure(ev.dst_pid);
     let src = names.lookup(ev.src_pid);
     let dst = names.lookup(ev.dst_pid);
-    let oneway = if ev.is_oneway() { " oneway" } else { "" };
     let _ = write!(out, "{src} ({}) -> {dst} ({}): ", ev.src_pid, ev.dst_pid);
     // When there's no AIDL interface token: a reply carries none by design; anything
     // else is likely HIDL/hwbinder or a special transaction, not an AIDL call.
@@ -782,7 +925,124 @@ fn format_core(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
     } else {
         let _ = write!(out, "<non-aidl code:{}>", ev.code);
     }
+}
+
+/// Write the shared transaction line into `out`:
+/// `src (pid) -> dst (pid): <label>, <size>B [oneway]`.
+fn format_core(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
+    use std::fmt::Write as _;
+    write_label(out, ev, names);
+    let oneway = if ev.is_oneway() { " oneway" } else { "" };
     let _ = write!(out, ", {}B{oneway}", ev.data_size);
+}
+
+/// Write an error line into `out`: the failing transaction's label followed by the
+/// human-readable binder return error code (`src (pid) -> dst (pid): <label> !! ERR`).
+fn format_error(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
+    use std::fmt::Write as _;
+    write_label(out, ev, names);
+    let _ = write!(out, " !! {}", br_error_name(ev.err_code));
+}
+
+/// Human-readable name for a captured binder return error code.
+fn br_error_name(code: u32) -> &'static str {
+    match code {
+        BR_DEAD_REPLY => "BR_DEAD_REPLY",
+        BR_FAILED_REPLY => "BR_FAILED_REPLY",
+        BR_FROZEN_REPLY => "BR_FROZEN_REPLY",
+        _ => "BR_ERROR",
+    }
+}
+
+/// Reader for the kernel's binder `failed_transaction_log`. The coarse `BR_FAILED_REPLY`
+/// code doesn't say *why* a transaction failed; the driver records the concrete errno as
+/// `return_error_param` in this ring of the last ~32 failures. We match an error event to
+/// its entry by the transaction `debug_id` and recover that errno (e.g. `-ENOSPC` = the
+/// target's binder buffer is full). Reading is on-demand and only for the rare error
+/// event, so it stays off the hot path.
+struct FailedTxLog {
+    path: std::path::PathBuf,
+    /// `debug_id` → concrete errno, accumulated across reads. The kernel log is a small
+    /// ring (~32 entries); during a burst an entry can rotate out before we process its
+    /// error event. Slurping the whole ring into this cache on each read means a failure
+    /// is decodable as long as we saw it *at some point* while it was in the ring.
+    cache: HashMap<i32, i32>,
+}
+
+impl FailedTxLog {
+    /// Cap the cache so a long session with many errors can't grow it without bound; the
+    /// ids are monotonic so a full clear only risks re-missing a handful of in-flight ones.
+    const CACHE_CAP: usize = 16384;
+
+    /// Resolve the log path once (binderfs first, then legacy debugfs). `None` if neither
+    /// is present — concrete reasons simply won't be attached.
+    fn resolve() -> Option<Self> {
+        const PATHS: [&str; 2] = [
+            "/dev/binderfs/binder_logs/failed_transaction_log",
+            "/sys/kernel/debug/binder/failed_transaction_log",
+        ];
+        PATHS
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists())
+            .map(|path| FailedTxLog {
+                path,
+                cache: HashMap::new(),
+            })
+    }
+
+    /// The concrete failure errno (negative) the kernel recorded for `debug_id`. Checks the
+    /// cache first, then re-reads the ring (merging every current entry into the cache)
+    /// before looking up again. `None` if the entry has already rotated out unseen.
+    fn errno_for(&mut self, debug_id: i32) -> Option<i32> {
+        if let Some(&errno) = self.cache.get(&debug_id) {
+            return Some(errno);
+        }
+        if let Ok(content) = fs::read_to_string(&self.path) {
+            if self.cache.len() > Self::CACHE_CAP {
+                self.cache.clear();
+            }
+            for line in content.lines() {
+                if let Some((id, errno)) = Self::parse_entry(line) {
+                    self.cache.insert(id, errno);
+                }
+            }
+        }
+        self.cache.get(&debug_id).copied()
+    }
+
+    /// Parse one log line into `(debug_id, errno)`. Each line looks like:
+    /// `<id>: call from A:B to C:D context <ctx> … ret <return_error>/<param> l=<line>`.
+    fn parse_entry(line: &str) -> Option<(i32, i32)> {
+        // The debug id is the leading `<id>:` token; a later `from A:B` also contains ':',
+        // so split on the first one only.
+        let (id_tok, rest) = line.split_once(':')?;
+        let id = id_tok.trim().parse::<i32>().ok()?;
+        // `ret <return_error>/<param>` — the param after the slash is the errno.
+        let after = rest.split(" ret ").nth(1)?;
+        let tok = after.split_whitespace().next()?;
+        let (_, param) = tok.split_once('/')?;
+        let errno = param.parse::<i32>().ok()?;
+        Some((id, errno))
+    }
+}
+
+/// Human-readable cause for a binder failure errno (`return_error_param`). Covers the
+/// causes seen in practice; unknown codes fall back to the bare number at the call site.
+fn errno_reason(errno: i32) -> Option<&'static str> {
+    Some(match errno {
+        -28 => "target buffer full",     // ENOSPC
+        -3 => "dead node",               // ESRCH
+        -22 => "invalid transaction",    // EINVAL
+        -1 => "operation not permitted", // EPERM
+        -13 => "permission denied",      // EACCES (often SELinux)
+        -9 => "bad file descriptor",     // EBADF
+        -14 => "fault copying data",     // EFAULT
+        -12 => "out of memory",          // ENOMEM
+        -11 => "would block",            // EAGAIN
+        -110 => "timed out",             // ETIMEDOUT
+        _ => return None,
+    })
 }
 
 /// Nanoseconds to add to a `CLOCK_MONOTONIC` timestamp to get `CLOCK_REALTIME`
