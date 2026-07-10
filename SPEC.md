@@ -37,9 +37,10 @@ and lets logs be re-decoded later against different catalogs.
 
 - **Transactions** — source → target, interface, code, parcel size, and the
   **oneway/sync** flag (`TF_ONE_WAY`).
-- **Transaction errors** — only `BR_FAILED_REPLY` and `BR_DEAD_REPLY`, logged with a
-  **human-readable error code** and the failing source → target. These come from the
-  binder **return/error path**, which requires a **second attach point** in the
+- **Transaction errors** — `BR_FAILED_REPLY`, `BR_DEAD_REPLY` and `BR_FROZEN_REPLY`,
+  logged with a **human-readable error code** (and, when recoverable, the concrete
+  errno/reason) plus the failing source → target, interface and method. These come from
+  the binder **return/error path**, which requires a **second attach point** in the
   probe (distinct from the `binder_transaction` entry hook). Error capture is
   **toggleable** and off unless enabled via the control app or the CLI.
 
@@ -47,7 +48,7 @@ and lets logs be re-decoded later against different catalogs.
 
 ### Output sinks
 
-The consumer writes each formatted log line to one of (`--sink console|logcat|both`):
+The consumer writes each formatted log line to one of (`--sink console|logcat|both|none`):
 
 - **logcat** — appears alongside normal logs under tag **`bindfetto`**, and each
   message is prefixed with the **`BINDFETTO`** marker. Either is enough for the
@@ -91,8 +92,9 @@ The on-device runtime is controllable two ways, exposing the same operations:
   from a shell (adb/root) with no app: start/stop, output sink, interface filter,
   and error-capture toggle.
 - **Control app (Android GUI)** — an operator-friendly front end that talks to the
-  consumer over a **control channel** (mechanism TBD — e.g. a unix domain socket or
-  local service).
+  consumer over a **control channel**: a line-oriented **TCP** server (`--control
+  [port]`, default 3491; `adb forward` from a host). Unix-socket + `SO_PEERCRED`
+  hardening is deferred (see Technical decisions).
 
 Operations exposed by both:
 
@@ -102,8 +104,8 @@ Operations exposed by both:
    deployment falls back to the adb/CLI path.
 1. **Start/stop collection** — control the capture lifecycle.
 2. **Filter interface names** — push an interface filter so only matching interfaces
-   are captured/emitted. Applied **in-kernel** via a BPF map of wanted descriptor
-   hashes, dropping non-matching events before the ring buffer.
+   are captured/emitted. Applied **in-kernel** via a `WANTED` BPF map keyed by the full
+   (zero-padded) descriptor, dropping non-matching events before the ring buffer.
 3. **Toggle error capture** — enable/disable the `BR_FAILED_REPLY`/`BR_DEAD_REPLY`
    attach point at runtime.
 
@@ -138,20 +140,20 @@ com.example.app (1234) -> system_server (5678): android.app.IActivityManager.sta
 
 | Component | Language | Role |
 |---|---|---|
-| **eBPF probe** | Rust (`aya`) | Kernel-side capture of transactions and (toggleable) errors; copies raw descriptor bytes, hashes them for in-kernel filtering → ring buffer. |
+| **eBPF probe** | Rust (`aya`) | Kernel-side capture of transactions and (toggleable) errors; copies raw descriptor bytes and uses the full descriptor as the key for in-kernel filtering → ring buffer. |
 | **Userspace consumer** | Rust | Drains ring buffer, resolves process names, applies interface filter, emits to sink. Driven by CLI args or the control app. |
 | **Control app** | Kotlin (Android) | GUI to deploy the binary, start/stop collection, set interface filters, toggle error capture. |
-| **AIDL catalog builder** | Python | Builds a JSON catalog mapping `(interface, code)` → method name from a folder of AIDL (via generated stubs / `--dumpapi`). |
-| **DLT Viewer plugin** | TBD | Decodes captured logs against the catalog inside DLT Viewer. |
+| **AIDL catalog builder** | Python | Builds a JSON catalog mapping `(interface, code)` → method name by parsing `.aidl` source (a file, a recursed folder, or an http(s) URL); no `aidl` compiler needed. |
+| **DLT Viewer plugin** | C++/Qt | Decodes captured logs against the catalog inside DLT Viewer (a thin `QDLTPluginDecoderInterface` shell over the Rust core's C ABI). |
 | **VS Code plugin** | TypeScript | Same decoding, as a VS Code extension. |
 
 ### AIDL catalog (JSON)
 
-A Python script takes a folder of AIDL (passed as a parameter) and emits a JSON
-catalog. Rather than re-deriving code order by hand, it reads the **real transaction
-constants** the AIDL compiler assigns (from generated stubs / `aidl --dumpapi`), so
-explicit `= N` ids are honored. The catalog is the shared contract between the (dumb)
-runtime logs and the (smart) viewer decoders. Shape is TBD, but conceptually:
+A Python script takes AIDL (a file, a recursed folder, or an http(s) URL) and emits a
+JSON catalog. It parses the `.aidl` **source directly** — numbering methods per
+interface in declaration order from `IBinder.FIRST_CALL_TRANSACTION` (1) and honoring
+explicit `= N` ids — so no `aidl` compiler or generated stubs are required. The catalog
+is the shared contract between the (dumb) runtime logs and the (smart) viewer decoders:
 
 ```
 {
@@ -182,30 +184,35 @@ Transaction codes are assigned per-interface starting at
   `android.app.IActivityManager`), extracted from the transaction. Not in the
   tracepoint — read from the transaction data buffer / binder internals. **Proven in
   the prior PoC;** the rewrite ports that approach.
-- **Hybrid parcel handling.** The probe copies the raw descriptor bytes out of the
-  (soon-freed) parcel and computes a bounded **hash** over them; **interpretation
-  (UTF-16→UTF-8 decode, formatting) happens in Rust userspace**, where it is
-  unit-testable with byte fixtures. The header offset is the only version-specific
-  constant the probe needs.
-- **In-kernel interface filter via descriptor hash.** The interface filter matches
-  the in-kernel descriptor hash against a BPF map of wanted hashes, dropping
-  unwanted events **before** the ring buffer — keeping the high-volume path cheap
-  without full string parsing in the probe. (New in the rewrite; not in the PoC.)
+- **Hybrid parcel handling.** The probe copies the raw (bounded) descriptor bytes out
+  of the (soon-freed) parcel into the event and, for filtering, matches those bytes
+  directly against the `WANTED` map; **interpretation (UTF-16→UTF-8 decode, formatting)
+  happens in Rust userspace**, where it is unit-testable with byte fixtures. The header
+  offset is the only version-specific constant the probe needs.
+- **In-kernel interface filter via the full descriptor.** The interface filter looks
+  the in-kernel descriptor up in a `WANTED` BPF map keyed by the full zero-padded
+  UTF-16LE descriptor (collision-free, so no in-probe hashing), gated by a 1-element
+  `FILTER_ON` flag map; non-matching events drop **before** the ring buffer, keeping
+  the high-volume path cheap. (New in the rewrite; not in the PoC.)
 - **AIDL catalog input: all `.aidl` files under a folder passed as a parameter.**
   The Python builder recurses a given directory. *Caveat:* to keep transaction codes
   aligned, that folder must be the AIDL that matches the device build.
-- **Control channel: unix domain socket** between control app and consumer, with
-  peer-credential (`SO_PEERCRED`) auth. *Caveat:* requires an SELinux policy rule for
-  the app's domain to connect to the daemon socket.
+- **Control channel: line-oriented TCP** (localhost / `adb forward`) between control
+  app and consumer — chosen over the original unix-socket design for testability. The
+  command set: `STATUS`, `START`/`STOP`, `SINK`, `DLT`, `ERRORS`, `TRACK`,
+  `LIST`/`GET`/`SET`/`CLEAR`. **Deferred hardening:** unix domain socket with
+  peer-credential (`SO_PEERCRED`) auth (needs an SELinux rule for the app's domain to
+  reach the daemon socket).
 - **Shared decoder core + thin plugins.** Catalog lookup + line parsing live in one
   plugin-agnostic core, exposed as a `bindfetto-decode` CLI; DLT Viewer and VS Code
   plugins are thin adapters over it. One viewer path shipped first.
-- **Catalog built from aidl-generated stubs, not hand-rolled ordering.** The Python
-  builder reads the real `TRANSACTION_* = FIRST_CALL_TRANSACTION + N` constants from
-  generated stubs / `aidl --dumpapi`, so explicit `= N` ids are honored and AIDL
-  numbering isn't re-implemented. Special transactions
-  (INTERFACE/DUMP/PING/SHELL_COMMAND) handled explicitly; native (non-AIDL)
-  interfaces are out of catalog coverage.
+- **Catalog built by parsing `.aidl` source.** The Python builder reads `.aidl`
+  directly (stdlib-only, no `aidl` compiler): it numbers methods per interface in
+  declaration order from `FIRST_CALL_TRANSACTION` and honors explicit `= N` ids,
+  skipping consts/nested types and stripping comments/annotations. Special
+  transactions (INTERFACE/DUMP/PING/SYSPROPS/SHELL_CMD) are resolved by the decoder
+  itself, not the catalog; native (non-AIDL) interfaces are out of coverage. *Caveat:*
+  feed the AIDL that matches the device build so codes align.
 - **Audience & platform reality: this is a platform-developer tool.** Loading eBPF is
   gated by SELinux, not Android permissions — in practice it needs userdebug/eng
   builds or custom SELinux policy. A signed app on a `user` build generally cannot
@@ -230,16 +237,20 @@ testable, and maintainable. Adopt/reject per preference.
 
 ## Open questions
 
-Still to decide:
+Resolved during the build (kept for the record):
 
-- **Transaction-error attach point:** which binder tracepoint / return-path hook
-  reliably surfaces `BR_FAILED_REPLY` / `BR_DEAD_REPLY` (the second attach point).
-- **Control command protocol:** the command set carried over the unix socket
-  (start/stop, filter, error toggle) and its encoding.
-- **Binary deployment without signature permission:** the fallback path and where
-  the privileged binary lives on device.
-- **CO-RE portability** across kernels — deferred; the initial dev target is fixed
-  (see below).
+- **Transaction-error attach point** → a `binder:binder_return` tracepoint watching the
+  return `cmd`, gated by `ERRORS_ON` and correlated per-thread via `LAST_TX`. Also
+  surfaces `BR_FROZEN_REPLY`, and decodes the concrete errno from the kernel
+  `failed_transaction_log`.
+- **Control command protocol** → a line-oriented TCP protocol (see Control surfaces).
+- **Binary deployment without signature permission** → the binary lives in
+  `/data/local/tmp`; the app tries `su`, else prints the `adb push` + run fallback.
+
+Still open:
+
+- **CO-RE portability** across kernels — deferred; the initial dev target is fixed.
+- **Control channel hardening** — unix socket + `SO_PEERCRED` (see Technical decisions).
 
 ## Non-goals (initial)
 
