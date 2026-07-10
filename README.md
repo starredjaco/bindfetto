@@ -1,4 +1,4 @@
-# BINDFETTO — A Binder analysis tool
+# BINDFETTO — Live kernel-level Binder IPC tracing for Android
 
 <img src='./bindfetto.png' width='20%' >
 
