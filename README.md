@@ -7,7 +7,7 @@
 Bindfetto observes Android **Binder** IPC traffic at the kernel level and surfaces it
 as human-readable transaction logs. Instead of guessing at cross-process calls, you
 see the live flow of Binder transactions — who called whom, over which interface, with
-which method, and whether it failed.
+which method, and whether it failed. Ideal for automotive development and in-car testing.
 
 > **The highlight: offline method-name decoding.** The kernel hot path stays cheap by
 > emitting only the *raw* transaction code (`IVehicle.[code:3]`). A separate offline
