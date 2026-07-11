@@ -233,6 +233,12 @@ Native Qt shared library — it must be built against the **same Qt major versio
 compiler ABI as your dlt-viewer**, and needs the dlt-viewer `qdlt` SDK. Build the Rust
 core first.
 
+`/path/to/dlt-viewer` below is a checkout of
+[COVESA/dlt-viewer](https://github.com/COVESA/dlt-viewer) built from source: the `qdlt`
+headers live in its `qdlt/` source dir and `libqdlt.{so,dylib}` under its `build/`
+output. (Alternatively, drop `plugins/dlt/` into the dlt-viewer source tree under
+`plugin/` and let its build resolve the headers/lib for you.)
+
 ```sh
 cd decode && cargo build --release        # produces libbindfetto_decode.a
 cd ../plugins/dlt
@@ -242,14 +248,19 @@ cmake -B build \
 cmake --build build
 ```
 
-Then copy the built plugin into DLT Viewer's plugins directory and set its config to
-your `catalog.json`:
+Then load the built plugin in DLT Viewer and set its config to your `catalog.json`:
 
 | OS | Built artifact |
 |---|---|
 | Linux | `libbindfettodecoderplugin.so` |
 | macOS | `libbindfettodecoderplugin.dylib` (Rust runtime pulls in CoreFoundation/Security, handled by CMake) |
 | Windows | `bindfettodecoderplugin.dll` |
+
+DLT Viewer has no fixed system plugins folder — it scans a **plugin search path you
+configure** in the app: *Settings → Preferences → Plugins*, add the directory holding the
+built artifact (e.g. `plugins/dlt/build/`), then enable **Bindfetto DLT decoder** in the
+Plugin Manager and point its config at `catalog.json`. (The default search path, if any,
+is shown in that same Preferences dialog.)
 
 To get bindfetto lines into DLT Viewer where the OEM has no logcat→DLT bridge, run the
 runtime with `--dlt-serve`, forward the port, and add a TCP ECU:
