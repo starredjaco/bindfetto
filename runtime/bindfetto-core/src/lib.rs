@@ -87,6 +87,22 @@ pub fn json_escape(out: &mut String, s: &str) {
     }
 }
 
+/// True if `name` is the unresolved `pid:<pid>` fallback (so the cache should keep
+/// retrying) rather than a real process name.
+pub fn is_pid_fallback(name: &str, pid: u32) -> bool {
+    name.strip_prefix("pid:").and_then(|n| n.parse::<u32>().ok()) == Some(pid)
+}
+
+/// True if `name` is a *transient* name that should not be cached — it's expected to
+/// change to a real one for the same pid. Covers the `pid:<n>` fallback and Android's
+/// `<pre-initialized>` app-zygote placeholder (any `<…>` name): a pre-forked USAP reads
+/// as `<pre-initialized>` until it's specialized into an actual app, after which the same
+/// pid resolves to the real package name. Real process names / paths never start with
+/// `<`, so the prefix is a safe signal.
+pub fn is_transient_name(name: &str, pid: u32) -> bool {
+    is_pid_fallback(name, pid) || name.starts_with('<')
+}
+
 /// Decode a captured `comm` (kernel task name: NUL-padded, ≤ 15 chars) into a name.
 /// `None` when it's empty/all-zero (no comm was captured). Used as the fallback name for
 /// a sender that has already exited by the time `/proc/<pid>` is read.
@@ -230,6 +246,21 @@ mod tests {
     }
 
     // --- error / errno decode --------------------------------------------------------
+
+    #[test]
+    fn transient_names_are_not_cached() {
+        // pid:<n> fallback.
+        assert!(is_pid_fallback("pid:42", 42));
+        assert!(!is_pid_fallback("pid:42", 7)); // wrong pid → a real "pid:42"-named proc
+        assert!(!is_pid_fallback("com.foo", 42));
+        // <pre-initialized> and any <…> placeholder are transient.
+        assert!(is_transient_name("<pre-initialized>", 42));
+        assert!(is_transient_name("<pre-initialize", 42)); // comm-truncated form
+        assert!(is_transient_name("pid:42", 42));
+        // Real names are stable → cache them.
+        assert!(!is_transient_name("com.android.systemui", 42));
+        assert!(!is_transient_name("/system/bin/surfaceflinger", 42));
+    }
 
     #[test]
     fn comm_name_reads_to_nul() {

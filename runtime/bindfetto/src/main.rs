@@ -45,8 +45,8 @@ use bindfetto_common::{IfaceKey, TxEvent, TxRecord, PARCEL_CAP_DEFAULT, PARCEL_C
 // `dlt as dlt_wire`: the consumer's own `mod dlt` is the TCP server; the core module is
 // the wire encoder it feeds.
 use bindfetto_core::{
-    br_error_name, comm_name, dlt as dlt_wire, errno_reason, iface_key, json_escape, push_hex,
-    write_iface_bytes,
+    br_error_name, comm_name, dlt as dlt_wire, errno_reason, iface_key, is_pid_fallback,
+    is_transient_name, json_escape, push_hex, write_iface_bytes,
 };
 use tokio::io::unix::AsyncFd;
 
@@ -1186,9 +1186,12 @@ impl NameCache {
     /// in-kernel — instead of the bare `pid:<n>`. `comm` all-zero means none was captured
     /// (e.g. the destination pid, which has no in-kernel comm).
     fn ensure_with_comm(&mut self, pid: u32, comm: &[u8; 16]) {
+        // Re-resolve while the cached name is transient — the `pid:<n>` fallback or an
+        // Android `<pre-initialized>` zygote placeholder that becomes the real app name
+        // once the process is specialized. Only a real name is cached for good.
         let unresolved = match self.0.get(&pid) {
             None => true,
-            Some(name) => is_pid_fallback(name, pid),
+            Some(name) => is_transient_name(name, pid),
         };
         if unresolved {
             let mut name = resolve_name(pid);
@@ -1259,12 +1262,4 @@ fn resolve_name(pid: u32) -> String {
         eprintln!("[names] pid {pid}: UNRESOLVED (/proc/{pid} exists: {alive})");
     }
     format!("pid:{pid}")
-}
-
-/// True if `name` is the unresolved `pid:<pid>` fallback from [`resolve_name`] (so the
-/// cache should keep retrying) rather than a real process name.
-fn is_pid_fallback(name: &str, pid: u32) -> bool {
-    name.strip_prefix("pid:")
-        .and_then(|n| n.parse::<u32>().ok())
-        == Some(pid)
 }
