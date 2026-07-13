@@ -1169,9 +1169,19 @@ fn write_iface(out: &mut String, ev: &TxEvent) -> bool {
 struct NameCache(HashMap<u32, String>);
 
 impl NameCache {
-    /// Resolve and cache `pid`'s name if not already known.
+    /// Resolve and cache `pid`'s name. Re-resolves while the cached value is still the
+    /// `pid:<n>` fallback: the first sighting can race a process that was mid-fork/exec
+    /// (no `cmdline`/`comm` yet) or had just exited, and caching that failure permanently
+    /// would keep mislabeling a pid that later became — or already is — resolvable. A
+    /// genuinely resolved name is stable for the pid's lifetime, so it's cached once.
     fn ensure(&mut self, pid: u32) {
-        self.0.entry(pid).or_insert_with(|| resolve_name(pid));
+        let unresolved = match self.0.get(&pid) {
+            None => true,
+            Some(name) => is_pid_fallback(name, pid),
+        };
+        if unresolved {
+            self.0.insert(pid, resolve_name(pid));
+        }
     }
 
     /// Look up a name already cached by [`ensure`]. Splitting resolution (`&mut`)
@@ -1198,4 +1208,12 @@ fn resolve_name(pid: u32) -> String {
         }
     }
     format!("pid:{pid}")
+}
+
+/// True if `name` is the unresolved `pid:<pid>` fallback from [`resolve_name`] (so the
+/// cache should keep retrying) rather than a real process name.
+fn is_pid_fallback(name: &str, pid: u32) -> bool {
+    name.strip_prefix("pid:")
+        .and_then(|n| n.parse::<u32>().ok())
+        == Some(pid)
 }
