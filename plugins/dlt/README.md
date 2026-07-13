@@ -56,17 +56,22 @@ same Qt major version and compiler ABI as your dlt-viewer. You need the dlt-view
    For a device/target build, cross-compile the core for that triple and point
    `BINDFETTO_DECODE_LIB` at the resulting `.a`.
 
-2. Configure and build the plugin, pointing CMake at your dlt-viewer SDK:
+2. Configure and build the plugin, pointing CMake at your dlt-viewer checkout:
 
    ```sh
-   cmake -B build \
-     -DDLT_VIEWER_QDLT_INCLUDE_DIR=/path/to/dlt-viewer/qdlt \
-     -DDLT_VIEWER_QDLT_LIB=/path/to/dlt-viewer/build/lib/libqdlt.so
+   cmake -B build -DDLT_VIEWER_DIR=/path/to/dlt-viewer
    cmake --build build
    ```
 
-   (Alternatively, drop this directory into the dlt-viewer source tree under `plugin/`
-   and add it to that build, which resolves the qdlt headers/lib automatically.)
+   `DLT_VIEWER_DIR` derives the qdlt headers (`<dir>/qdlt`) and, if present, libqdlt
+   (`<dir>/build/bin/libqdlt`).
+
+   **You do not need to build dlt-viewer.** Only the qdlt *headers* are required — a
+   fresh checkout has them. The plugin is `dlopen`ed by DLT Viewer, which already holds
+   qdlt's symbols, so they resolve at load time; CMake links `libqdlt` directly only when
+   a `build/` exists. (If your layout differs, set `DLT_VIEWER_QDLT_INCLUDE_DIR` and
+   optionally `DLT_VIEWER_QDLT_LIB` directly. Or drop this directory into the dlt-viewer
+   source tree under `plugin/` and add it to that build.)
 
 3. Copy the built `libbindfettodecoderplugin.{so,dylib,dll}` into DLT Viewer's plugins
    directory (or add its folder in *Settings → Plugins*). Enable the plugin and set its
