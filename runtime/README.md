@@ -6,7 +6,7 @@ captures Binder transactions and a Rust userspace consumer that drains them.
 > **Build status.** The whole runtime compiles and runs: the **eBPF probe** for
 > `bpfel-unknown-none` and the **userspace consumer** for `aarch64-linux-android`
 > (with the eBPF object embedded via `aya-build`), against aya 0.13.1 / aya-ebpf
-> 0.1.1 with NDK r30. **Verified live on an arm64 AVD** (milestones M1–M5): real
+> 0.1.1 with NDK r26+ (any recent NDK). **Verified live on an arm64 AVD** (milestones M1–M5): real
 > binder capture, interface descriptors, in-kernel filtering, error events, and every
 > sink. `aya` is Linux-only, so the consumer only builds for the Android target, not
 > the macOS host. The tracepoint field offsets are set for the dev AVD kernel —

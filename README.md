@@ -97,8 +97,10 @@ and lets the same captured logs be re-decoded against any catalog version.
   permissive-capable SELinux domain. An **arm64 AVD** works well (runs natively on
   Apple silicon).
 - **Runtime build:** Rust **nightly** (pinned via `rust-toolchain.toml`) + `rust-src`,
-  `bpf-linker`, the `aarch64-linux-android` target, and the **Android NDK** (r27,
-  `27.0.12077973`) for the cross-linker.
+  `bpf-linker`, the `aarch64-linux-android` target, and the **Android NDK** (r26 or
+  newer) for the cross-linker. The version in the paths below (`27.0.12077973`) is just
+  an example — use whatever NDK you have installed under `ndk/<version>/`. (The `30` in
+  the linker name is the target **Android API level** (minSdk 30), not the NDK version.)
 - **adb** + the Android emulator/platform tools.
 - **Decode / catalog / plugins:** a host toolchain per component (Rust, Python 3,
   Node, or Qt+CMake) — see below.
