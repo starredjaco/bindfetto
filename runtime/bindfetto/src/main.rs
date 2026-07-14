@@ -711,6 +711,17 @@ async fn main() -> anyhow::Result<()> {
     } else if parcel_enabled {
         println!("bindfetto: parcel payload capture on (up to {parcel_cap}B/transaction)");
     }
+    // Diagnostic: read the flag maps back so the log reflects the *kernel* state, not just
+    // what we asked for. If PARCEL_ON reads 0 after `--parcel on`, the map write did not
+    // stick and the probe will never stage payload — the first thing to check when parcel
+    // capture "does nothing" on a device.
+    let parcel_on_kernel = parcel_map.get(&0, 0).unwrap_or(0);
+    let parcel_max_kernel = parcel_max_map.get(&0, 0).unwrap_or(0);
+    println!(
+        "bindfetto: parcel flags (kernel maps): PARCEL_ON={parcel_on_kernel} \
+         PARCEL_MAX={parcel_max_kernel}B iface_filter={} requested={parcel_requested}",
+        if ifaces.is_empty() { "none" } else { "active" }
+    );
 
     // Shared runtime state: capture on by default, discovery off (only tracked when the
     // app asks), sink from `--sink`, DLT streaming on iff `--dlt-serve` was explicit.
@@ -830,6 +841,12 @@ struct Emitter {
     core: String,
     scratch: String,
     json: String,
+    /// Parcel-capture diagnostics: proves the probe→consumer payload path actually runs.
+    /// `parcel_records` counts variable-length (parcel-bearing) ring items; the two flags
+    /// gate one-time notes so the log states plainly whether payload is flowing.
+    parcel_records: u64,
+    logged_first_parcel: bool,
+    warned_no_parcel: bool,
 }
 
 impl Emitter {
@@ -850,6 +867,9 @@ impl Emitter {
             core: String::new(),
             scratch: String::new(),
             json: String::new(),
+            parcel_records: 0,
+            logged_first_parcel: false,
+            warned_no_parcel: false,
         }
     }
 
@@ -857,7 +877,43 @@ impl Emitter {
     /// parcel bytes (M6) when payload capture ran for this transaction, else `None`; it
     /// is rendered as a trailing `parcel=<hex>` token the offline decoder reads.
     fn emit(&mut self, ev: &TxEvent, parcel: Option<&[u8]>, names: &mut NameCache) {
-        self.state.captured.fetch_add(1, Ordering::Relaxed);
+        let captured = self.state.captured.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Parcel-capture diagnostics. State the payload path plainly so a device where
+        // `--parcel on` "does nothing" is easy to triage: note the first parcel record
+        // that arrives; if the flag is on but no payload has flowed after a warm-up, warn
+        // once (probe attached but staging failed, e.g. bad tracepoint offset or a kernel
+        // that rejects the userspace buffer read).
+        match parcel {
+            Some(bytes) => {
+                self.parcel_records += 1;
+                if !self.logged_first_parcel {
+                    self.logged_first_parcel = true;
+                    println!(
+                        "bindfetto: parcel path live — first payload record ({} bytes, \
+                         data_size={})",
+                        bytes.len(),
+                        ev.data_size
+                    );
+                }
+            }
+            None => {
+                if !self.warned_no_parcel
+                    && self.parcel_records == 0
+                    && captured >= 200
+                    && self.state.parcel_on.load(Ordering::Relaxed)
+                {
+                    self.warned_no_parcel = true;
+                    eprintln!(
+                        "bindfetto: warning — PARCEL_ON is set but no parcel payload has \
+                         arrived after {captured} transactions; probe is capturing but not \
+                         staging bytes (check tracepoint offsets and the kernel's userspace \
+                         buffer read)"
+                    );
+                }
+            }
+        }
+
         // Master capture gate (`STOP`): drop drained events without emitting.
         if !self.state.capturing.load(Ordering::Relaxed) {
             return;

@@ -16,7 +16,7 @@
 #include "plugininterface.h"   // dlt-viewer qdlt SDK
 #include "bindfetto_decode.h"  // bindfetto decode core C ABI
 
-#define BINDFETTO_PLUGIN_VERSION "0.1.0"
+#define BINDFETTO_PLUGIN_VERSION "0.2.0"
 
 class BindfettoDecoderPlugin : public QObject,
                                public QDLTPluginInterface,
