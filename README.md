@@ -99,9 +99,10 @@ and lets the same captured logs be re-decoded against any catalog version.
 
 ## Requirements
 
-- **Device:** an Android target with a BTF-enabled kernel (5.10+), **root**, and a
-  permissive-capable SELinux domain. An **arm64 AVD** works well (runs natively on
-  Apple silicon).
+- **Device:** an Android target or AVD with a BTF-enabled kernel (```CONFIG_KPROBES=y```), **root**, and a
+  permissive-capable SELinux domain.<br>
+  Verify with: ```adb shell zcat /proc/config.gz | grep CONFIG_KPROBES```
+
 - **Runtime build:** Rust **nightly** (pinned via `rust-toolchain.toml`) + `rust-src`,
   `bpf-linker`, the `aarch64-linux-android` target, and the **Android NDK** (r26 or
   newer) for the cross-linker. The version in the paths below (`27.0.12077973`) is just
