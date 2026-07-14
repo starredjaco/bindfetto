@@ -283,6 +283,8 @@ built artifact (e.g. `plugins/dlt/build/`), then enable **Bindfetto DLT decoder*
 Plugin Manager and point its config at `catalog.json`. (The default search path, if any,
 is shown in that same Preferences dialog.)
 
+<img width="600" alt="image" src="https://github.com/user-attachments/assets/78841cc6-8da7-4319-a9aa-26d8585d0027" />
+
 To get bindfetto lines into DLT Viewer where the OEM has no logcat→DLT bridge, run the
 runtime with `--dlt-serve`, forward the port, and add a TCP ECU:
 
