@@ -35,13 +35,13 @@ Grab prebuilt binaries from the [latest release](https://github.com/tortishead/b
 | Download | What it is | How to use |
 |---|---|---|
 | `bindfetto-aarch64-android` | On-device capture runtime (arm64 Android ELF) | `adb root && adb shell setenforce 0`, then `adb push bindfetto-aarch64-android /data/local/tmp/bindfetto` and `adb shell /data/local/tmp/bindfetto`. Flags in [Common runtime invocations](#common-runtime-invocations). |
-| `bindfetto-app-debug.apk` | Android control app (drives the daemon live) | `adb install -r bindfetto-app-debug.apk`. Launch **bindfetto control**, tap **Connect**. Needs the runtime running with `--control 3491`. |
-| `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a catalog JSON, open a log, run **Bindfetto: Decode Active Editor**. |
-| `libbindfettodecoderplugin-macos-arm64.so` | DLT Viewer decode plugin (macOS arm64 only) | DLT Viewer → *Settings → Preferences → Plugins*, add the folder holding this file, enable **Bindfetto DLT decoder**, point config at `catalog.json`. Other OSes: build from source. |
+| `bindfetto-app-debug.apk` | Android control app¹ (drives the daemon live) | `adb install -r bindfetto-app-debug.apk`. Launch **bindfetto control**, tap **Connect**. Needs the runtime running with `--control 3491`. |
+| `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a catalog² JSON, open a log, run **Bindfetto: Decode Active Editor**. |
+| `libbindfettodecoderplugin-macos-arm64.so` | DLT Viewer decode plugin (macOS arm64 only) | DLT Viewer → *Settings → Preferences → Plugins*, add the folder holding this file, enable **Bindfetto DLT decoder**, point config at `catalog.json`². Other OSes: build from source. |
 
-> You still need an **AIDL catalog** for method-name decoding (runtime emits raw codes). Build one with the catalog builder — see [below](#catalog-builder-python-3-stdlib-only). Prebuilt binaries cover the runtime + viewers, not the catalog (it's device-build-specific).
+> <sup>1</sup> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
 
-> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
+> <sup>2</sup> You still need an **AIDL catalog** for method-name decoding (runtime emits raw codes). Build one with the catalog builder — see [below](#catalog-builder-python-3-stdlib-only). Prebuilt binaries cover the runtime + viewers, not the catalog (it's device-build-specific).
 
 ---
 
