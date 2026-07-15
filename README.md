@@ -41,6 +41,8 @@ Grab prebuilt binaries from the [latest release](https://github.com/tortishead/b
 
 > You still need an **AIDL catalog** for method-name decoding (runtime emits raw codes). Build one with the catalog builder — see [below](#catalog-builder-python-3-stdlib-only). Prebuilt binaries cover the runtime + viewers, not the catalog (it's device-build-specific).
 
+> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
+
 ---
 
 ## Architecture
