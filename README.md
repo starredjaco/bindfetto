@@ -36,7 +36,7 @@ Grab prebuilt binaries from the [latest release](https://github.com/tortishead/b
 |---|---|---|
 | `bindfetto-aarch64-android` | On-device capture runtime (arm64 Android ELF) | `adb root && adb shell setenforce 0`, then `adb push bindfetto-aarch64-android /data/local/tmp/bindfetto` and `adb shell /data/local/tmp/bindfetto`. Flags in [Common runtime invocations](#common-runtime-invocations). |
 | `bindfetto-app-debug.apk` | Android control app¹ (drives the daemon live) | `adb install -r bindfetto-app-debug.apk`. Launch **bindfetto control**, tap **Connect**. Needs the runtime running with `--control 3491`. |
-| `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a catalog² JSON, open a log, run **Bindfetto: Decode Active Editor**. |
+| `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a `catalog.json`², open a log, run **Bindfetto: Decode Active Editor**. |
 | `libbindfettodecoderplugin-macos-arm64.so` | DLT Viewer decode plugin (macOS arm64 only) | DLT Viewer → *Settings → Preferences → Plugins*, add the folder holding this file, enable **Bindfetto DLT decoder**, point config at `catalog.json`². Other OSes: build from source. |
 
 > <sup>1</sup> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
