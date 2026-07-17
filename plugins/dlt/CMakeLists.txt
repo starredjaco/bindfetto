@@ -9,25 +9,22 @@ set(CMAKE_AUTOMOC ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
 
-# --- dlt-viewer qdlt SDK (headers + library) -------------------------------------
-# Easiest: point DLT_VIEWER_DIR at your (built) dlt-viewer checkout — the qdlt headers
-# and libqdlt are derived from it:
-#   -DDLT_VIEWER_DIR=/path/to/dlt-viewer
-# expecting <DLT_VIEWER_DIR>/qdlt/*.h and <DLT_VIEWER_DIR>/build/bin/libqdlt.
-# Advanced (non-standard layout): set the two specific vars below instead.
+# --- dlt-viewer qdlt SDK (headers only) ------------------------------------------
+# Only the qdlt *headers* are needed: DLT Viewer dlopen's the plugin and already has
+# qdlt's symbols in its process, so libqdlt is never linked — the symbols resolve from
+# the host at load time (matches the stock plugins, keeps the .so portable). A *fresh*
+# dlt-viewer checkout — no build/ — is enough.
+# Easiest: point DLT_VIEWER_DIR at a dlt-viewer checkout:
+#   -DDLT_VIEWER_DIR=/path/to/dlt-viewer   (expects <DLT_VIEWER_DIR>/qdlt/*.h)
+# Advanced (non-standard layout): set DLT_VIEWER_QDLT_INCLUDE_DIR directly.
 set(DLT_VIEWER_DIR "" CACHE PATH
-    "dlt-viewer checkout root; derives qdlt headers + built libqdlt")
+    "dlt-viewer checkout root; derives qdlt headers")
 set(DLT_VIEWER_QDLT_INCLUDE_DIR "" CACHE PATH
     "dlt-viewer qdlt headers (default: <DLT_VIEWER_DIR>/qdlt)")
 
 if(DLT_VIEWER_DIR AND NOT DLT_VIEWER_QDLT_INCLUDE_DIR)
     set(DLT_VIEWER_QDLT_INCLUDE_DIR "${DLT_VIEWER_DIR}/qdlt")
 endif()
-
-# libqdlt lands in the checkout's build output; also honor default search paths.
-find_library(DLT_VIEWER_QDLT_LIB NAMES qdlt
-    HINTS "${DLT_VIEWER_DIR}/build/bin"
-    DOC "dlt-viewer qdlt shared library (libqdlt), under <DLT_VIEWER_DIR>/build/bin")
 
 # --- bindfetto Rust decode core (C ABI) ------------------------------------------
 set(BINDFETTO_DECODE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../decode/include"
@@ -42,11 +39,6 @@ find_library(BINDFETTO_DECODE_LIB NAMES bindfetto_decode
     DOC "Rust decode core static library (build with: cargo build --release in decode/)")
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${_bf_saved_suffixes})
 
-# Only the qdlt *headers* are mandatory: the plugin is dlopen'd by DLT Viewer, which
-# already has qdlt's symbols in its process, so libqdlt can be left to resolve at load
-# time (see the link section below). That means a *fresh* dlt-viewer checkout — no
-# build/ — is enough; building dlt-viewer is only needed if you want the plugin to link
-# libqdlt directly.
 if(NOT DLT_VIEWER_QDLT_INCLUDE_DIR)
     message(FATAL_ERROR
         "dlt-viewer qdlt headers not found. Pass -DDLT_VIEWER_DIR=/path/to/dlt-viewer "
@@ -57,11 +49,6 @@ if(NOT EXISTS "${DLT_VIEWER_QDLT_INCLUDE_DIR}/plugininterface.h")
     message(FATAL_ERROR
         "DLT_VIEWER_QDLT_INCLUDE_DIR=${DLT_VIEWER_QDLT_INCLUDE_DIR} has no plugininterface.h "
         "— check DLT_VIEWER_DIR points at a dlt-viewer checkout (expects qdlt/ there).")
-endif()
-if(NOT DLT_VIEWER_QDLT_LIB)
-    message(STATUS
-        "libqdlt not found (no dlt-viewer build) — building against qdlt headers only; "
-        "its symbols resolve from the DLT Viewer process when the plugin loads.")
 endif()
 if(NOT BINDFETTO_DECODE_LIB)
     message(FATAL_ERROR
@@ -83,11 +70,10 @@ target_link_libraries(bindfettodecoderplugin PRIVATE
     ${BINDFETTO_DECODE_LIB}
 )
 
-if(DLT_VIEWER_QDLT_LIB)
-    # Link libqdlt directly when a dlt-viewer build is available.
-    target_link_libraries(bindfettodecoderplugin PRIVATE ${DLT_VIEWER_QDLT_LIB})
-elseif(APPLE)
-    # Headers-only: leave qdlt symbols undefined, resolved from the host at dlopen.
+# qdlt symbols are never linked — they resolve from the DLT Viewer process at dlopen,
+# so the plugin stays portable (matches the stock plugins).
+if(APPLE)
+    # Mach-O needs an explicit flag to leave the symbols undefined.
     target_link_options(bindfettodecoderplugin PRIVATE -undefined dynamic_lookup)
 endif()
 # On ELF (Linux) a MODULE already permits undefined symbols, so no flag is needed there.

@@ -44,7 +44,7 @@ The lines show up in DLT Viewer's live trace and this plugin decodes them the sa
 
 DLT Viewer plugins are native C++/Qt shared libraries and must be built against the
 same Qt major version and compiler ABI as your dlt-viewer. You need the dlt-viewer
-`qdlt` SDK (its export headers + `libqdlt`).
+`qdlt` SDK *headers* (no `libqdlt` build required).
 
 1. Build the Rust core static library (produces `libbindfetto_decode.a` and the C
    header):
@@ -63,15 +63,14 @@ same Qt major version and compiler ABI as your dlt-viewer. You need the dlt-view
    cmake --build build
    ```
 
-   `DLT_VIEWER_DIR` derives the qdlt headers (`<dir>/qdlt`) and, if present, libqdlt
-   (`<dir>/build/bin/libqdlt`).
+   `DLT_VIEWER_DIR` derives the qdlt headers (`<dir>/qdlt`).
 
    **You do not need to build dlt-viewer.** Only the qdlt *headers* are required — a
    fresh checkout has them. The plugin is `dlopen`ed by DLT Viewer, which already holds
-   qdlt's symbols, so they resolve at load time; CMake links `libqdlt` directly only when
-   a `build/` exists. (If your layout differs, set `DLT_VIEWER_QDLT_INCLUDE_DIR` and
-   optionally `DLT_VIEWER_QDLT_LIB` directly. Or drop this directory into the dlt-viewer
-   source tree under `plugin/` and add it to that build.)
+   qdlt's symbols, so `libqdlt` is never linked — they resolve from the host process at
+   load time (same as the stock plugins, and keeps the `.so` portable). (If your layout
+   differs, set `DLT_VIEWER_QDLT_INCLUDE_DIR` directly. Or drop this directory into the
+   dlt-viewer source tree under `plugin/` and add it to that build.)
 
 3. Copy the built `libbindfettodecoderplugin.{so,dylib,dll}` into DLT Viewer's plugins
    directory (or add its folder in *Settings → Plugins*). Enable the plugin and set its
