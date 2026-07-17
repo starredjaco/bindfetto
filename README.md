@@ -34,7 +34,7 @@ Grab prebuilt binaries from the [latest release](https://github.com/tortishead/b
 
 | Download | What it is | How to use |
 |---|---|---|
-| `bindfetto-aarch64-android` | On-device capture runtime (arm64 Android ELF) | `adb root && adb shell setenforce 0`, then `adb push bindfetto-aarch64-android /data/local/tmp/bindfetto` and `adb shell /data/local/tmp/bindfetto`. Flags in [Common runtime invocations](#common-runtime-invocations). |
+| `bindfetto-aarch64-android` | On-device capture runtime (arm64 Android ELF) | `adb root && adb shell setenforce 0`, then `adb push bindfetto-aarch64-android /data/local/tmp/bindfetto`, `adb shell chmod 755 /data/local/tmp/bindfetto` and `adb shell /data/local/tmp/bindfetto`. Flags in [Common runtime invocations](#common-runtime-invocations). |
 | `bindfetto-app-debug.apk` | Android control app¹ (drives the daemon live) | `adb install -r bindfetto-app-debug.apk`. Launch **bindfetto control**, tap **Connect**. Needs the runtime running with `--control 3491`. |
 | `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a `catalog.json`², open a log, run **Bindfetto: Decode Active Editor**. |
 | `libbindfettodecoderplugin-macos-arm64.so` | DLT Viewer decode plugin (macOS arm64 only) | DLT Viewer → *Settings → Preferences → Plugins*, add the folder holding this file, enable **Bindfetto DLT decoder**, point config at `catalog.json`². Other OSes: build from source. |
@@ -182,6 +182,7 @@ adb root
 adb shell setenforce 0        # BPF load is SELinux-gated; permissive for dev
 
 adb push target/aarch64-linux-android/release/bindfetto /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/bindfetto   # ensure exec bit
 adb shell /data/local/tmp/bindfetto        # run as root
 ```
 

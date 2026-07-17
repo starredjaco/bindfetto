@@ -332,10 +332,61 @@
       </div>
     </section>
 
-    <!-- 6 — THE INSIGHT -->
+    <!-- 5 — eBPF IN A NUTSHELL -->
     <section class="slide">
       <div class="wrap">
-        <div class="eyebrow"><span class="num">02</span> The gap → the idea <span class="dash"></span></div>
+        <div class="eyebrow"><span class="num">02</span> eBPF in a nutshell <span class="dash"></span></div>
+        <h2>Run a tiny verified program <span class="amber">inside</span> the kernel.</h2>
+        <p class="lead" style="margin-top:14px">eBPF lets you attach a small sandboxed program to a kernel hook. It runs in kernel context on every event — no context switch, no copy to userspace to decide what matters.</p>
+
+        <div class="zone offline" style="margin-top:22px">
+          <div class="zh"><span class="dot"></span>what makes it safe + cheap</div>
+          <ul class="clean" style="display:grid; grid-template-columns:1fr 1fr; gap:12px 26px">
+            <li><span class="tick chk">▸</span><span><b>Verifier</b> proves it terminates and touches no bad memory — <i>before</i> load. A rejected program never runs.</span></li>
+            <li><span class="tick chk">▸</span><span><b>JIT</b> compiles the bytecode to native — it runs at kernel speed, not interpreted.</span></li>
+            <li><span class="tick chk">▸</span><span><b>Maps + ring buffers</b> are the only channel to userspace — kernel writes, your consumer drains.</span></li>
+            <li><span class="tick chk">▸</span><span>Attaches to <b>tracepoints</b> the kernel already fires — no driver, no reboot, no patched kernel.</span></li>
+          </ul>
+        </div>
+
+        <div class="split" style="margin-top:22px; align-items:stretch">
+          <div class="wire" style="margin:0">
+            <span class="c">// kernel/common — drivers/android/binder_trace.h (AOSP, upstream)</span><br>
+            <span class="k">TRACE_EVENT</span>(<b>binder_transaction</b>,<br>
+            &nbsp;&nbsp;TP_PROTO(<span class="v">struct</span> binder_transaction *t, <span class="v">int</span> reply),<br>
+            &nbsp;&nbsp;TP_STRUCT__entry(<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="c">__field(int, debug_id) __field(int, to_proc)</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="c">__field(int, reply) __field(unsigned int, code) …</span><br>
+            &nbsp;&nbsp;),<br>
+            &nbsp;&nbsp;<span class="c">… TP_fast_assign copies t-&gt;code, t-&gt;flags …</span><br>
+            );<br>
+            <br>
+            <span class="c">// drivers/android/binder.c — binder_transaction()</span><br>
+            <span class="c">// the same call the kernel makes on every IPC</span><br>
+            <span style="background:color-mix(in srgb,var(--amber) 16%,transparent); border-radius:4px; padding:1px 4px"><span class="k">trace_binder_transaction</span>(t, reply);</span>
+            <span class="a">&nbsp;&nbsp;// ← eBPF attaches here</span>
+          </div>
+
+          <div class="zone device">
+            <div class="zh"><span class="dot"></span>our hook · binder_transaction</div>
+            <ul class="clean">
+              <li><span class="tick chk">▸</span><span>Trips on <b>every</b> binder call — the cheap work only: <strong>read the raw code, filter, push a TxEvent</strong>. Nothing else. The <strong>fast dumb capture</strong> half of the split.</span></li>
+              <li><span class="tick chk">▸</span><span>Reads scalars at fixed offsets — <b>reply</b> @ 24 · <b>code</b> @ 28 · <b>flags</b> @ 32 · <b>to_proc</b> @ 16.</span></li>
+              <li><span class="tick chk">▸</span><span>Reply acks dropped early; filter checked before any field read. A stashed kprobe supplies the descriptor + parcel size.</span></li>
+            </ul>
+            <p style="margin-top:14px; font-family:var(--mono); font-size:12px; color:var(--fg-mute); line-height:1.6">
+              offsets confirmed per-device against<br>
+              <span class="kbd">/sys/kernel/tracing/events/binder/binder_transaction/format</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 — THE INSIGHT · gap → idea -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="eyebrow"><span class="num">03</span> The gap → the idea <span class="dash"></span></div>
         <h2>Read the parcel in-kernel. Name the method later.</h2>
         <div class="diagram compact" style="margin-top:18px">
           <svg viewBox="0 0 900 414" style="max-height:50vh" role="img" aria-label="The runtime stack, top to bottom: an eBPF probe in kernel space writes each transaction into a BPF ring buffer; the userspace consumer drains it and injects a line into logcat, DLT, or JSONL; decode plugins read those offline and, using an AIDL catalog, resolve the real method name.">
