@@ -24,6 +24,7 @@ switch sinks, stream to DLT, and pick which interfaces to keep.
 No Perfetto or tracing stack — just a standalone binary. Ideal for **automotive
 development and in-car testing.**
 
+---
 
 ## Install
 
