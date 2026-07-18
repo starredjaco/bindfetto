@@ -5,24 +5,23 @@
 ## Live kernel-level Binder IPC tracing for Android
 
 Bindfetto observes Android **Binder** IPC traffic at the kernel level and surfaces it
-as human-readable transaction logs.
+as human-readable transaction logs. No Perfetto or tracing stack — just a standalone
+binary. Ideal for **automotive development and in-car testing.**
 
+> [!TIP]
 > **The highlight: offline method-name decoding.** The kernel hot path stays cheap by
 > emitting only the *raw* transaction code. A separate offline pass — in the CLI, DLT
 > Viewer, or VS Code — resolves that code to the real method name against a precompiled
 > **AIDL catalog**.
 
-Example of capture on real hardware target in DLT-Viewer:
+The bundled Android **control app** drives the on-device daemon live — toggle capture,
+switch sinks, stream to DLT, and pick which interfaces to keep.
+
+Example capture on real hardware, decoded in DLT Viewer:
 ```
 ... BFTO BFTO BIND 0 log info verbose 1 BINDFETTO dded.projection (41933) -> pid:33480 (33480):
 android.content.pm.IPackageManager.getApplicationInfo(packageName="com.google.android.embedded.projection", flags=128, userId=0), 184B
 ```
-
-The bundled Android **control app** drives the on-device daemon live — toggle capture,
-switch sinks, stream to DLT, and pick which interfaces to keep.
-
-No Perfetto or tracing stack — just a standalone binary. Ideal for **automotive
-development and in-car testing.**
 
 ---
 
