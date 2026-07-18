@@ -16,6 +16,8 @@ target/
 # Build output
 /build/
 build/
+/build-mac/
+build-mac/
 /out/
 *.o
 *.so

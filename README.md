@@ -19,30 +19,60 @@ android.content.pm.IPackageManager.getApplicationInfo(packageName="com.google.an
 ```
 
 The bundled Android **control app** drives the on-device daemon live — toggle capture,
-switch sinks, stream to DLT, and pick which interfaces to keep:
-
-<img src='./docs/screenshot-control.png' width='80%' alt='bindfetto control app — Control tab'>
+switch sinks, stream to DLT, and pick which interfaces to keep.
 
 No Perfetto or tracing stack — just a standalone binary. Ideal for **automotive
 development and in-car testing.**
 
+
+## Install
+
+The installer pulls the latest release artifacts and installs the ones you pick — no building:
+
+```sh
+./install.sh            # interactive menu
+./install.sh --all      # everything this host supports
+./install.sh --dlt --vscode   # pick components (skips the menu)
+```
+
+macOS + Linux (bash). It detects your OS, downloads from the [latest release](https://github.com/tortishead/bindfetto/releases/latest) (`--tag <tag>` to pin one), and per component:
+
+- **runtime** / **app** — `adb push` + `adb install`; only runs when exactly one authorized device is connected.
+- **dlt** — auto-searches DLT Viewer's plugins directory (override with `--dlt-plugin-dir <dir>`), copies the plugin in.
+- **vscode** — `code --install-extension`.
+
+Per-artifact manual steps are in [Deploy](#deploy).
+
 ---
 
-## Usage
+## Quickstart
 
-Grab prebuilt binaries from the [latest release](https://github.com/tortishead/bindfetto/releases/latest) — skip building. Each artifact and how to run it:
+End-to-end once installed. You need an **AIDL catalog** for method names — the runtime
+emits raw codes (see [Catalog builder](#catalog-builder-python-3-stdlib-only)).
 
-| Download | What it is | How to use |
-|---|---|---|
-| `bindfetto-aarch64-android` | On-device capture runtime (arm64 Android ELF) | `adb root && adb shell setenforce 0`, then `adb push bindfetto-aarch64-android /data/local/tmp/bindfetto`, `adb shell chmod 755 /data/local/tmp/bindfetto` and `adb shell /data/local/tmp/bindfetto`. Flags in [Common runtime invocations](#common-runtime-invocations). |
-| `bindfetto-app-debug.apk` | Android control app¹ (drives the daemon live) | `adb install -r bindfetto-app-debug.apk`. Launch **bindfetto control**, tap **Connect**. Needs the runtime running with `--control 3491`. |
-| `bindfetto-decode-*.vsix` | VS Code decode extension | Code → Extensions → **Install from VSIX…** → pick the file. Set `bindfetto.catalogPath` to a `catalog.json`², open a log, run **Bindfetto: Decode Active Editor**. |
-| `libbindfettodecoderplugin-macos-arm64.so` | DLT Viewer decode plugin (macOS arm64 only) | DLT Viewer → *Settings → Preferences → Plugins*, add the folder holding this file, enable **Bindfetto DLT decoder**, point config at `catalog.json`². Other OSes: build from source. |
+1. **Build a catalog** from AIDL matching the device build:
+   ```sh
+   python3 catalog/bindfetto_catalog.py -o catalog.json /path/to/aosp/frameworks/base
+   ```
+2. **Start the daemon** on device (as root), serving DLT and the control channel:
+   ```sh
+   adb root && adb shell setenforce 0
+   adb shell /data/local/tmp/bindfetto --control 3491 --dlt-serve --sink none
+   ```
+   Details + all flags in [Deploy the runtime](#deploy-the-runtime-on-device).
+3. **Drive it** from the control app¹ (launch **bindfetto control**, tap **Connect**) —
+   toggle capture, pick interfaces, switch sinks.
+
+   <img src='./docs/screenshot-control.png' width='450' alt='bindfetto control app — Control tab'>
+
+4. **Decode.** Point a viewer at a catalog and read method names:
+   - **DLT Viewer** — enable **Bindfetto DLT decoder**, set its config to generated JSON catalog file.
+
+     <img src="./docs/screenshot-dlt-viewer.png"  width="450" alt="Bindfetto method names decoded in DLT Viewer" />
+   - **VS Code** — set `bindfetto.catalogPath`, open a log, run **Bindfetto: Decode Active Editor**.
+   - **CLI** — `adb logcat -s bindfetto | bindfetto-decode --catalog catalog.json`.
 
 > <sup>1</sup> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
-
-> <sup>2</sup> You still need an **AIDL catalog** for method-name decoding (runtime emits raw codes). Build one with the catalog builder — see [below](#catalog-builder-python-3-stdlib-only). Prebuilt binaries cover the runtime + viewers, not the catalog (it's device-build-specific).
-
 ---
 
 ## Architecture
@@ -133,13 +163,17 @@ and lets the same captured logs be re-decoded against any catalog version.
 
 ---
 
-## Deploy the runtime (on device)
+## Build
+
+Optional if you installed prebuilt artifacts — build only the components you need to modify.
+
+### Runtime (cross-compile for Android)
 
 The core workflow is identical on every OS; only the **NDK toolchain path** and the
 **linker wrapper name** differ. The cross-linker is configured in
 `runtime/.cargo/config.toml` (defaults to `aarch64-linux-android30-clang` on PATH).
 
-### 1. One-time toolchain setup
+#### One-time toolchain setup
 
 ```sh
 # All platforms
@@ -172,60 +206,18 @@ $env:Path = "$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin;$
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = "aarch64-linux-android30-clang.cmd"
 ```
 
-### 2. Build, push, run (all platforms)
+#### Compile
 
 ```sh
 cd runtime
 cargo build --release --target aarch64-linux-android   # embeds the eBPF object via build.rs
-
-adb root
-adb shell setenforce 0        # BPF load is SELinux-gated; permissive for dev
-
-adb push target/aarch64-linux-android/release/bindfetto /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/bindfetto   # ensure exec bit
-adb shell /data/local/tmp/bindfetto        # run as root
 ```
 
-> On a new device, confirm the tracepoint field offsets in
-> `bindfetto-ebpf/src/main.rs` (`OFF_TO_PROC`, `OFF_CODE`, `OFF_FLAGS`) match:
-> ```sh
-> adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
-> ```
+Output binary: `target/aarch64-linux-android/release/bindfetto` — push and run it in [Deploy](#deploy-the-runtime-on-device).
 
-### Common runtime invocations
+### Offline decode toolchain
 
-```sh
-# Keep only PowerManager + ActivityManager, stream to DLT Viewer, no console noise
-adb shell /data/local/tmp/bindfetto --sink none --dlt-serve \
-  --iface android.os.IPowerManager,android.app.IActivityManager
-
-# Capture to JSONL and logcat, with error events on
-adb shell /data/local/tmp/bindfetto --sink logcat --jsonl /data/local/tmp/tx.jsonl --errors on
-
-# Run as a controllable daemon for the app (auto-binds the DLT server)
-adb shell /data/local/tmp/bindfetto --control 3491 --sink none
-
-# Capture parcel payloads (arguments) for one interface, up to 4 KiB each
-adb shell /data/local/tmp/bindfetto --iface android.os.IPowerManager --parcel on --parcel-max 4096
-```
-
-| Flag | Effect |
-|---|---|
-| `--sink console\|logcat\|both\|none` | Human-readable line sink (default `console`). |
-| `--jsonl <path>` | Also write one JSON object per transaction. |
-| `--dlt-serve [port]` | Act as a DLT TCP server (default 3490). |
-| `--iface <name>` | In-kernel exact-match interface filter; repeatable / comma-separated. |
-| `--errors [on\|off]` | Capture `BR_FAILED_REPLY` / `BR_DEAD_REPLY` with a decoded errno. |
-| `--parcel [on\|off]` | Capture raw parcel payloads (needs `--iface`); arguments decoded offline. |
-| `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256, max 30720). |
-| `--include-replies` | Keep normal replies (otherwise dropped before the ring buffer). |
-| `--control [port]` | Line-protocol TCP control channel (default 3491). |
-
----
-
-## Build the offline decode toolchain
-
-### Catalog builder (Python 3, stdlib only)
+#### Catalog builder (Python 3, stdlib only)
 
 Works identically on Linux / macOS / Windows.
 
@@ -241,7 +233,7 @@ python3 bindfetto_catalog.py --args -o catalog.json /path/to/aosp/frameworks/bas
 > **Codes are aligned to the exact AIDL you feed it** — use the AIDL that matches the
 > device build.
 
-### Decode CLI (Rust, host build)
+#### Decode CLI (Rust, host build)
 
 ```sh
 cd decode
@@ -257,7 +249,7 @@ adb logcat -s bindfetto | ./target/release/bindfetto-decode --catalog catalog.js
 > On Windows the binary is `bindfetto-decode.exe`; pipe with PowerShell:
 > `adb logcat -s bindfetto | .\target\release\bindfetto-decode.exe --catalog catalog.json`.
 
-### VS Code extension (WASM)
+#### VS Code extension (WASM)
 
 ```sh
 cd plugins/vscode
@@ -270,7 +262,7 @@ npm run smoke         # standalone Node check, no VS Code needed
 Set `bindfetto.catalogPath` to a catalog JSON (or a folder of them), open a bindfetto
 log, and run **Bindfetto: Decode Active Editor**. Same steps on all three OSes.
 
-### DLT Viewer plugin (C++/Qt)
+#### DLT Viewer plugin (C++/Qt)
 
 Native Qt shared library — it must be built against the **same Qt major version and
 compiler ABI as your dlt-viewer**, and needs the dlt-viewer `qdlt` SDK. Build the Rust
@@ -303,8 +295,6 @@ built artifact (e.g. `plugins/dlt/build/`), then enable **Bindfetto DLT decoder*
 Plugin Manager and point its config at `catalog.json`. (The default search path, if any,
 is shown in that same Preferences dialog.)
 
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/78841cc6-8da7-4319-a9aa-26d8585d0027" />
-
 To get bindfetto lines into DLT Viewer where the OEM has no logcat→DLT bridge, run the
 runtime with `--dlt-serve`, forward the port, and add a TCP ECU:
 
@@ -312,9 +302,7 @@ runtime with `--dlt-serve`, forward the port, and add a TCP ECU:
 adb forward tcp:3490 tcp:3490   # then add a TCP ECU at localhost:3490 in DLT Viewer
 ```
 
----
-
-## Deploy the control app (Android)
+### Control app (Android)
 
 Needs **JDK 17+** (Android Studio's bundled JBR works) and the Android SDK. Building
 the runtime first bundles its binary into the app for the Deploy tab; otherwise the
@@ -325,7 +313,6 @@ Deploy tab shows an adb fallback.
 export JAVA_HOME="/path/to/jdk17"           # e.g. /Applications/Android Studio.app/Contents/jbr/Contents/Home on macOS
 cd bindfetto-app
 ./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 **Windows (PowerShell)**
@@ -333,7 +320,93 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 cd bindfetto-app
 .\gradlew.bat :app:assembleDebug
-adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+Output APK: `app/build/outputs/apk/debug/app-debug.apk` — install it in [Deploy](#deploy-the-control-app-android).
+
+---
+
+## Deploy
+
+### Deploy the runtime (on device)
+
+```sh
+adb root
+adb shell setenforce 0        # BPF load is SELinux-gated; permissive for dev
+adb push target/aarch64-linux-android/release/bindfetto /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/bindfetto   # ensure exec bit
+adb shell /data/local/tmp/bindfetto        # run as root
+```
+
+On a new device, confirm the tracepoint field offsets in
+`bindfetto-ebpf/src/main.rs` (`OFF_TO_PROC`, `OFF_CODE`, `OFF_FLAGS`) match:
+```sh
+adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
+```
+
+#### Common runtime invocations
+
+| Flag | Effect |
+|---|---|
+| `--sink console\|logcat\|both\|none` | Human-readable line sink (default `console`). |
+| `--jsonl <path>` | Also write one JSON object per transaction. |
+| `--dlt-serve [port]` | Act as a DLT TCP server (default 3490). |
+| `--iface <name>` | In-kernel exact-match interface filter; repeatable / comma-separated. |
+| `--errors [on\|off]` | Capture `BR_FAILED_REPLY` / `BR_DEAD_REPLY` with a decoded errno. |
+| `--parcel [on\|off]` | Capture raw parcel payloads (needs `--iface`); arguments decoded offline. |
+| `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256, max 30720). |
+| `--include-replies` | Keep normal replies (otherwise dropped before the ring buffer). |
+| `--control [port]` | Line-protocol TCP control channel (default 3491). |
+
+```sh
+# Keep only PowerManager + ActivityManager, stream to DLT Viewer, no console noise
+adb shell /data/local/tmp/bindfetto --sink none --dlt-serve \
+  --iface android.os.IPowerManager,android.app.IActivityManager
+
+# Capture to JSONL and logcat, with error events on
+adb shell /data/local/tmp/bindfetto --sink logcat --jsonl /data/local/tmp/tx.jsonl --errors on
+
+# Run as a controllable daemon for the app (auto-binds the DLT server)
+adb shell /data/local/tmp/bindfetto --control 3491 --sink none
+
+# Capture parcel payloads (arguments) for one interface, up to 4 KiB each
+adb shell /data/local/tmp/bindfetto --iface android.os.IPowerManager --parcel on --parcel-max 4096
+```
+
+#### Control protocol
+
+Run with `--control 3491` and the daemon opens a **line-protocol TCP server** — the same
+wire the control app speaks (`bindfetto-app/.../ControlClient.kt`). The app connects to
+`127.0.0.1:3491` on-device; from a host, forward the port and drive it with any TCP client
+(automation, CI, no GUI):
+
+```sh
+adb forward tcp:3491 tcp:3491
+printf 'START\n'  | nc localhost 3491    # begin capture
+printf 'STATUS\n' | nc localhost 3491    # dump state
+printf 'SET android.os.IPowerManager\n' | nc localhost 3491   # filter to one interface
+```
+
+One command per line; replies are `OK` / `ERR …`, or a body terminated by `END`.
+
+| Command | Effect | Reply |
+|---|---|---|
+| `STATUS` | Dump state: capturing, sink, dlt, errors, parcel, filter count, counters. | fields + `END` |
+| `START` / `STOP` | Toggle capture. | `OK` |
+| `SINK <console\|logcat\|both\|none>` | Switch the line sink. | `OK` / `ERR` |
+| `DLT <on\|off>` | Toggle the DLT TCP server. | `OK` / `ERR` |
+| `ERRORS <on\|off>` | Toggle error capture (flips the BPF flag map). | `OK` / `ERR` |
+| `PARCEL <on\|off>` / `PARCEL max <bytes>` | Toggle parcel capture / retune the cap. | `OK` / `ERR` |
+| `TRACK <on\|off>` | Toggle interface discovery. | `OK` / `ERR` |
+| `LIST` | List observed interfaces (discovery). | list + `END` |
+| `GET` | List the active filter. | list + `END` |
+| `SET <csv>` | Set the interface filter (comma-separated). | `OK <n>` |
+| `CLEAR` | Clear the filter (also disables parcel capture). | `OK 0` |
+
+### Deploy the control app (Android)
+
+```sh
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Launch **bindfetto control** and tap **Connect**. The app runs on-device and reaches
