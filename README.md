@@ -43,6 +43,34 @@ Manual alternative: runtime + app steps are in [Deploy](#deploy); DLT plugin and
 extension setup under [Build](#offline-decode-toolchain) (drop the release asset in place
 of the built artifact).
 
+### Cutting a release
+
+`release.sh` stages the built artifacts under canonical, versioned asset names and (with
+`--upload`) publishes them to the matching GitHub release. Each component is staged only if
+its build output is present, so it can run per-host (macOS `.so` on a Mac, Linux `.so` on
+Linux) and re-upload with `--clobber`.
+
+```sh
+./release.sh                 # version from runtime/Cargo.toml, stage to dist/ (dry run)
+./release.sh --upload        # create/refresh the release and upload (needs gh, authed)
+./release.sh 0.2.0 --upload  # override the version explicitly
+```
+
+Asset names carry the version; `install.sh` resolves each component by a stable
+prefix+suffix pattern, so any release installs without a name change:
+
+| Component | Asset name |
+|---|---|
+| runtime binary | `bindfetto-<ver>-aarch64-android` |
+| control app | `bindfetto-app-<ver>.apk` |
+| VS Code extension | `bindfetto-decode-<ver>.vsix` |
+| DLT plugin (macOS) | `libbindfettodecoderplugin-<ver>-macos-arm64.so` |
+| DLT plugin (Linux) | `libbindfettodecoderplugin-<ver>-linux.so` |
+
+The APK is signed with the debug keystore by default; point `release.sh` at a real keystore
+with `BINDFETTO_KEYSTORE` / `BINDFETTO_KEYSTORE_PASS` / `BINDFETTO_KEY_ALIAS` /
+`BINDFETTO_KEY_PASS`.
+
 ---
 
 ## Quickstart
@@ -359,6 +387,7 @@ adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
 | `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256). Hard cap **30 KiB** — the wire record is a fixed buffer; larger parcels decode `…(truncated)`. |
 | `--include-replies` | Keep normal replies (otherwise dropped before the ring buffer). |
 | `--control [port]` | Line-protocol TCP control channel (default 3491). |
+| `--version`, `-V` | Print the build version and exit (no root / BPF needed). |
 
 ```sh
 # Keep only PowerManager + ActivityManager, stream to DLT Viewer, no console noise

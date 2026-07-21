@@ -565,6 +565,12 @@ mod control {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Answer --version before any BPF work so it runs without root.
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("bindfetto {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let mut ebpf = Ebpf::load(EBPF_OBJ).context("load eBPF object")?;
 
     let kp: &mut KProbe = ebpf

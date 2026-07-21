@@ -31,6 +31,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // Extract jniLibs to nativeLibraryDir at install so the bundled bindfetto binary is a

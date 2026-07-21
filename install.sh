@@ -99,21 +99,28 @@ for a in data.get("assets",[]):
 ' "$1"
 }
 
-# ---- asset name selection (per OS) ----------------------------------------
-A_RUNTIME="bindfetto-aarch64-android"
-A_APP="bindfetto-app-debug.apk"
-if [ "$OS" = "macos" ]; then
-  A_DLT="libbindfettodecoderplugin-macos-arm64.so"
-else
-  A_DLT="libbindfettodecoderplugin.so"
-fi
-# vsix name carries the version; resolve it from the asset list
-A_VSIX="$(printf '%s' "$REL_JSON" | python3 -c '
-import json,sys
+# resolve_asset <python-regex> -> prints the first asset whose name matches, or empty.
+# Assets carry the release version in the name; components are matched by a stable
+# prefix+suffix pattern so the installer works against any release.
+resolve_asset() {
+  printf '%s' "$REL_JSON" | python3 -c '
+import json,re,sys
+pat=re.compile(sys.argv[1])
 for a in json.load(sys.stdin).get("assets",[]):
-    if a.get("name","").endswith(".vsix"):
+    if pat.search(a.get("name","")):
         print(a["name"]); break
-')"
+' "$1"
+}
+
+# ---- asset name selection (per OS) ----------------------------------------
+A_RUNTIME="$(resolve_asset '^bindfetto-.*-aarch64-android$')"
+A_APP="$(resolve_asset '^bindfetto-app-.*\.apk$')"
+A_VSIX="$(resolve_asset '\.vsix$')"
+if [ "$OS" = "macos" ]; then
+  A_DLT="$(resolve_asset '^libbindfettodecoderplugin-.*macos.*\.so$')"
+else
+  A_DLT="$(resolve_asset '^libbindfettodecoderplugin-(?!.*macos).*\.so$')"
+fi
 
 # ---- interactive menu ------------------------------------------------------
 if [ "$ANY_FLAG" -eq 0 ]; then
@@ -146,6 +153,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 download() { # <asset-name> -> echoes local path
   local name="$1" url dest
+  [ -n "$name" ] || { warn "component not present in this release — skipping."; return 1; }
   url="$(asset_url "$name")"
   [ -n "$url" ] || { warn "asset not in release: $name"; return 1; }
   dest="$WORKDIR/$name"

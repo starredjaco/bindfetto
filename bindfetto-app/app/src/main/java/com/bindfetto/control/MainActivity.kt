@@ -278,6 +278,12 @@ fun AppScreen(vm: ControlViewModel = viewModel()) {
                         )
                         Spacer(Modifier.width(10.dp))
                         Text("bindfetto", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "v${BuildConfig.VERSION_NAME}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

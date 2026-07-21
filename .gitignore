@@ -21,3 +21,4 @@ build-mac/
 /out/
 *.o
 *.so
+dist/
