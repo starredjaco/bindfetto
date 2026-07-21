@@ -43,39 +43,6 @@ Manual alternative: runtime + app steps are in [Deploy](#deploy); DLT plugin and
 extension setup under [Build](#offline-decode-toolchain) (drop the release asset in place
 of the built artifact).
 
-### Cutting a release
-
-`release.sh` stages the built artifacts under canonical, versioned asset names and (with
-`--upload`) publishes them to the matching GitHub release. Each component is staged only if
-its build output is present, so it can run per-host (macOS `.so` on a Mac, Linux `.so` on
-Linux) and re-upload with `--clobber`.
-
-All components share one version (lockstep). Bump every manifest at once, then build and
-release — `release.sh` refuses to `--upload` a mismatched set:
-
-```sh
-./bump-version.sh 0.2.0      # sets runtime + decode + vscode + app (versionCode auto +1)
-# review, commit, push, then build the components (see below)
-./release.sh                 # version from runtime/Cargo.toml, stage to dist/ (dry run)
-./release.sh --upload        # preflight (all versions must agree), then create/upload
-./release.sh 0.2.0 --upload  # override the version explicitly
-```
-
-Asset names carry the version; `install.sh` resolves each component by a stable
-prefix+suffix pattern, so any release installs without a name change:
-
-| Component | Asset name |
-|---|---|
-| runtime binary | `bindfetto-<ver>-aarch64-android` |
-| control app | `bindfetto-app-<ver>.apk` |
-| VS Code extension | `bindfetto-decode-<ver>.vsix` |
-| DLT plugin (macOS) | `libbindfettodecoderplugin-<ver>-macos-arm64.so` |
-| DLT plugin (Linux) | `libbindfettodecoderplugin-<ver>-linux.so` |
-
-The APK is signed with the debug keystore by default; point `release.sh` at a real keystore
-with `BINDFETTO_KEYSTORE` / `BINDFETTO_KEYSTORE_PASS` / `BINDFETTO_KEY_ALIAS` /
-`BINDFETTO_KEY_PASS`.
-
 ---
 
 ## Quickstart
@@ -448,6 +415,43 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Launch **bindfetto control** and tap **Connect**. The app runs on-device and reaches
 the daemon at `127.0.0.1:3491`; from a host you can drive the same protocol via
 `adb forward tcp:3491 tcp:3491` and any TCP client.
+
+---
+
+## Cutting a release
+
+Maintainer task — publishes the built artifacts to a GitHub release for `install.sh` to pull.
+
+`release.sh` stages the built artifacts under canonical, versioned asset names and (with
+`--upload`) publishes them to the matching GitHub release. Each component is staged only if
+its build output is present, so it can run per-host (macOS `.so` on a Mac, Linux `.so` on
+Linux) and re-upload with `--clobber`.
+
+All components share one version (lockstep). Bump every manifest at once, then build and
+release — `release.sh` refuses to `--upload` a mismatched set:
+
+```sh
+./bump-version.sh 0.2.0      # sets runtime + decode + vscode + app (versionCode auto +1)
+# review, commit, push, then build the components (see Build above)
+./release.sh                 # version from runtime/Cargo.toml, stage to dist/ (dry run)
+./release.sh --upload        # preflight (all versions must agree), then create/upload
+./release.sh 0.2.0 --upload  # override the version explicitly
+```
+
+Asset names carry the version; `install.sh` resolves each component by a stable
+prefix+suffix pattern, so any release installs without a name change:
+
+| Component | Asset name |
+|---|---|
+| runtime binary | `bindfetto-<ver>-aarch64-android` |
+| control app | `bindfetto-app-<ver>.apk` |
+| VS Code extension | `bindfetto-decode-<ver>.vsix` |
+| DLT plugin (macOS) | `libbindfettodecoderplugin-<ver>-macos-arm64.so` |
+| DLT plugin (Linux) | `libbindfettodecoderplugin-<ver>-linux.so` |
+
+The APK is signed with the debug keystore by default; point `release.sh` at a real keystore
+with `BINDFETTO_KEYSTORE` / `BINDFETTO_KEYSTORE_PASS` / `BINDFETTO_KEY_ALIAS` /
+`BINDFETTO_KEY_PASS`.
 
 ---
 
