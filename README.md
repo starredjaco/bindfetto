@@ -425,13 +425,14 @@ Maintainer task — publishes the built artifacts to a GitHub release for `insta
 `release.sh` stages the built artifacts under canonical, versioned asset names and (with
 `--upload`) publishes them to the matching GitHub release. Each component is staged only if
 its build output is present, so it can run per-host (macOS `.so` on a Mac, Linux `.so` on
-Linux) and re-upload with `--clobber`.
+Linux) and re-upload with `--clobber`. A macOS-only run publishes no Linux `.so` (and vice
+versa) — run it once on each OS to complete the pair.
 
 All components share one version (lockstep). Bump every manifest at once, then build and
 release — `release.sh` refuses to `--upload` a mismatched set:
 
 ```sh
-./bump-version.sh 0.2.0      # sets runtime + decode + vscode + app (versionCode auto +1)
+./bump-version.sh 0.2.0      # sets runtime + decode + vscode + dlt + app (versionCode auto +1)
 # review, commit, push, then build the components (see Build above)
 ./release.sh                 # version from runtime/Cargo.toml, stage to dist/ (dry run)
 ./release.sh --upload        # preflight (all versions must agree), then create/upload
